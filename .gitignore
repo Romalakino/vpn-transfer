@@ -1,0 +1,4 @@
+bin/sing-box
+*.log
+/tmp/
+servers.txt

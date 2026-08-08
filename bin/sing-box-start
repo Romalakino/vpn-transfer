@@ -1,0 +1,5 @@
+#!/bin/bash
+ulimit -n 131072
+ulimit -Hn 131072
+export ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
+exec /home/vlad/.local/bin/sing-box run -c /home/vlad/.config/sing-box/config.json

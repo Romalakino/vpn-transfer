@@ -1,0 +1,98 @@
+#!/bin/bash
+# VPN menu (wofi) — плавающее меню по центру экрана
+CACHE_FILE="/tmp/vpn-prescan-cache.txt"
+LOCAL_SERVERS="/home/vlad/.local/share/vpn/servers.txt"
+
+declare -A cache_names
+declare -A urls
+declare -A items
+
+if [ -f "$CACHE_FILE" ]; then
+    while IFS='|' read -r h p n; do
+        [ -z "$h" ] && continue
+        cache_names["$h:$p"]="$n"
+    done < "$CACHE_FILE"
+fi
+
+menu=""
+if [ -f /tmp/vpn-status ] && [ "$(cat /tmp/vpn-status 2>/dev/null)" = "ON" ]; then
+    menu="■  OFF — выключить VPN\n"
+fi
+
+idx=0
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    [[ "$line" != vless://* ]] && continue
+    idx=$((idx + 1))
+    parsed=$(python3 -c "
+import urllib.parse, sys
+line = '''$(echo "$line" | sed "s/'/\\\\'/g")'''
+try:
+    after_at = line.split('@', 1)[1]
+    host_port = after_at.split('?')[0].split('#')[0].rstrip('/')
+    h, p = host_port.split(':')
+    name = urllib.parse.unquote(line.split('#')[1]) if '#' in line else ''
+    print(f'{h}|{p}|{name}')
+except:
+    pass
+" 2>/dev/null)
+    [ -z "$parsed" ] && continue
+    host=$(echo "$parsed" | awk -F'|' '{print $1}')
+    port=$(echo "$parsed" | awk -F'|' '{print $2}')
+    name=$(echo "$parsed" | awk -F'|' '{print $3}')
+    key="$host:$port"
+
+    urls[$idx]="$line"
+    display_name=$(echo "$name" | sed 's/^[✗✓ ]*//')
+    country=$(echo "$display_name" | awk '{for(i=1;i<=NF;i++) if($i ~ /[A-Z]{2}$/) print $i; exit}')
+    rest=$(echo "$display_name" | sed 's/^[^ ]* //')
+    main_name="${display_name%% *} ${display_name#* }"
+    if echo "$display_name" | grep -qE '[0-9]+\.?[0-9]*Mbps'; then
+        main_name=$(echo "$display_name" | sed -E 's/ *[0-9]+\.?[0-9]*Mbps.*$//')
+        meta=$(echo "$display_name" | grep -oE '[0-9]+\.?[0-9]*Mbps[^<]*')
+    else
+        meta=""
+    fi
+
+    cache_entry="${cache_names[$key]}"
+    if [ -n "$cache_entry" ] && ! echo "$cache_entry" | grep -q "^✗"; then
+        marker="✓ "
+    else
+        marker="  "
+    fi
+
+    if [ -n "$meta" ]; then
+        item="${marker}${main_name} <span size='small' color='#7a82a0'>${meta}</span>"
+    else
+        item="${marker}${main_name}"
+    fi
+    items[$idx]="$item"
+    menu="${menu}${item}\n"
+done < "$LOCAL_SERVERS"
+
+[ -z "$menu" ] && notify-send "VPN" "Нет серверов в списке" && exit 1
+
+sel=$(echo -e "$menu" | wofi --dmenu --insensitive -p "VPN" 2>/dev/null)
+[ -z "$sel" ] && exit 0
+
+if echo "$sel" | grep -q "^■"; then
+    /home/vlad/.local/bin/vpn-toggle off
+    exit 0
+fi
+
+found=""
+for i in $(seq 1 $idx); do
+    item=$(echo -e "${items[$i]}" | sed -E 's/<[^>]*>//g; s/^[✓✗ ]*//')
+    sel_clean=$(echo -e "$sel" | sed -E 's/<[^>]*>//g; s/^[✓✗ ]*//')
+    if [ "$item" = "$sel_clean" ]; then
+        found=$i
+        break
+    fi
+done
+
+[ -z "$found" ] && exit 1
+
+url="${urls[$found]}"
+echo "CONNECTING" > /tmp/vpn-status
+b64=$(echo "$url" | base64 -w0)
+/home/vlad/.local/bin/vpn-toggle connect-url "$b64"

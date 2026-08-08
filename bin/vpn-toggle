@@ -1,0 +1,359 @@
+#!/bin/bash
+# Local verified server list (checked 2026-08-08, top-30 by speed)
+SUB_URL="file:///home/vlad/.local/share/vpn/servers.txt"
+HWID="local"
+LOCAL_SERVERS="/home/vlad/.local/share/vpn/servers.txt"
+SINGBOX_CONFIG="/home/vlad/.config/sing-box/config.json"
+SERVERS_FILE="/tmp/vpn-local-servers.txt"
+STATUS_FILE="/tmp/vpn-status"
+LOG_FILE="/tmp/sing-box.log"
+VPN_SERVER_FILE="/tmp/vpn-server-ip"
+VPN_NAME_FILE="/tmp/vpn-server-name"
+VIA_GW="192.168.1.1"
+VIA_IF="enp13s0"
+TUN_GW="172.19.0.2"
+TUN_IF="tun0"
+
+fetch_servers() {
+    cp "$LOCAL_SERVERS" "$SERVERS_FILE" 2>/dev/null
+    local count=$(wc -l < "$SERVERS_FILE" 2>/dev/null)
+    echo "Загружено серверов: $count"
+    [ "$count" -gt 0 ] && return 0 || return 1
+}
+
+build_config() {
+    local host="$1" port="$2" uuid="$3" sni="$4" pbk="$5" sid="$6" fp="$7" security="$8"
+    if [ "$security" = "reality" ]; then
+        tls_block="\"tls\": {
+        \"enabled\": true, \"server_name\": \"$sni\",
+        \"utls\": { \"enabled\": true, \"fingerprint\": \"$fp\" },
+        \"reality\": { \"enabled\": true, \"public_key\": \"$pbk\", \"short_id\": \"$sid\" }
+      }"
+    else
+        tls_block="\"tls\": {
+        \"enabled\": true, \"server_name\": \"$sni\",
+        \"utls\": { \"enabled\": true, \"fingerprint\": \"$fp\" }
+      }"
+    fi
+    cat > "$SINGBOX_CONFIG" <<EOF
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      { "tag": "dns-direct", "type": "udp", "server": "1.1.1.1" }
+    ],
+    "rules": [
+      { "server": "dns-direct" }
+    ]
+  },
+  "inbounds": [
+    {
+      "type": "tun", "tag": "tun-in", "interface_name": "$TUN_IF",
+      "address": "172.19.0.1/30",
+      "auto_route": true, "stack": "system"
+    },
+    { "type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 10808 },
+    { "type": "http", "tag": "http-in", "listen": "127.0.0.1", "listen_port": 10809 }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "ip_cidr": ["$host/32"], "outbound": "direct" },
+      { "ip_is_private": true, "outbound": "direct" }
+    ],
+    "auto_detect_interface": true
+  },
+  "outbounds": [
+    {
+      "type": "vless", "tag": "proxy", "server": "$host", "server_port": $port, "uuid": "$uuid", "flow": "xtls-rprx-vision",
+      $tls_block
+    },
+    { "type": "direct", "tag": "direct" }
+  ]
+}
+EOF
+}
+
+setup_routes() {
+    local vpn_ip="$1"
+    sudo ip route add "$vpn_ip" via "$VIA_GW" dev "$VIA_IF" table 2022 2>/dev/null
+    sudo ip route add 0.0.0.0/1 via "$TUN_GW" dev "$TUN_IF" table 2022 2>/dev/null
+    sudo ip route add 128.0.0.0/1 via "$TUN_GW" dev "$TUN_IF" table 2022 2>/dev/null
+}
+
+cleanup_routes() {
+    local vpn_ip="$1"
+    sudo ip route del "$vpn_ip" via "$VIA_GW" dev "$VIA_IF" table 2022 2>/dev/null
+    sudo ip route del 0.0.0.0/1 via "$TUN_GW" dev "$TUN_IF" table 2022 2>/dev/null
+    sudo ip route del 128.0.0.0/1 via "$TUN_GW" dev "$TUN_IF" table 2022 2>/dev/null
+}
+
+do_stop() {
+    local vpn_ip=$(cat "$VPN_SERVER_FILE" 2>/dev/null)
+    sudo pkill sing-box 2>/dev/null
+    sleep 1
+    cleanup_routes "$vpn_ip"
+    rm -f "$VPN_SERVER_FILE" "$VPN_NAME_FILE"
+    echo "OFF" > "$STATUS_FILE"
+}
+
+check_internet() {
+    local ip
+    for ep in https://icanhazip.com https://ifconfig.me; do
+        ip=$(curl -x socks5h://127.0.0.1:10808 -s --max-time 3 "$ep" 2>&1)
+        if [ $? -eq 0 ] && [ -n "$ip" ] && ! echo "$ip" | grep -qi 'error\|denied\|limit'; then
+            return 0
+        fi
+    done
+    ip=$(curl -s --max-time 3 https://icanhazip.com 2>&1)
+    if [ $? -eq 0 ] && [ -n "$ip" ] && ! echo "$ip" | grep -qi 'error\|denied\|limit'; then
+        return 0
+    fi
+    return 1
+}
+
+try_server() {
+    local random_server="$1"
+
+    parsed=$(python3 -c "
+import urllib.parse
+line = '''$random_server'''
+name = urllib.parse.unquote(line.split('#')[1]) if '#' in line else 'Unknown'
+params_str = line.split('?')[1].split('#')[0]
+params = dict(p.split('=',1) for p in params_str.split('&') if '=' in p)
+host_port = line.split('@')[1].split('?')[0].rstrip('/')
+h, p = host_port.split(':')
+uuid = line.split('@')[0][8:]
+security = params.get('security','')
+print(f'{h}|{p}|{uuid}|{params.get(\"sni\",\"\")}|{params.get(\"pbk\",\"\")}|{params.get(\"sid\",\"\")}|{params.get(\"fp\",\"firefox\")}|{name}|{security}')
+" 2>/dev/null)
+    IFS='|' read -r host port uuid sni pbk sid fp name security <<< "$parsed"
+
+    if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        resolved="$host"
+    else
+        resolved=$(getent hosts "$host" | awk '{print $1}' | head -1)
+        [ -z "$resolved" ] && resolved="$host"
+    fi
+
+    build_config "$resolved" "$port" "$uuid" "$sni" "$pbk" "$sid" "$fp" "$security"
+    echo "$resolved" > "$VPN_SERVER_FILE"
+    echo "Подключаюсь к $name..."
+
+    sudo bash -c 'setsid nohup /home/vlad/.local/bin/sing-box-start > /tmp/sing-box.log 2>&1 < /dev/null &'
+
+    for i in $(seq 1 6); do
+        sleep 1
+        if ip addr show "$TUN_IF" 2>/dev/null | grep -q "inet "; then
+            break
+        fi
+    done
+
+    ip=""
+    for ep in https://icanhazip.com https://ifconfig.me; do
+        ip=$(curl -x socks5h://127.0.0.1:10808 -s --max-time 3 "$ep" 2>&1)
+        if [ $? -eq 0 ] && [ -n "$ip" ] && ! echo "$ip" | grep -qi 'error\|denied\|limit'; then
+            break
+        fi
+        ip=""
+    done
+    if [ -n "$ip" ]; then
+        echo "$name" > "$VPN_NAME_FILE"
+        echo "ON" > "$STATUS_FILE"
+        notify-send -r 777004 -t 3000 "●  VPN ON" "$name — $ip"
+        echo "VPN ВКЛ → $ip ($name)"
+
+        sleep 2
+        if ! check_internet; then
+            notify-send -r 777004 -t 5000 "✕  VPN ERROR" "Нет интернета — отключаю"
+            echo "Нет интернета через VPN, отключаю..."
+            do_stop
+            return 1
+        fi
+        return 0
+    fi
+
+    do_stop
+    notify-send -r 777004 -t 3000 "✕  VPN ERROR" "Server not responding"
+    return 1
+}
+
+check_server() {
+    local host="$1" port="$2"
+    timeout 3 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null
+}
+
+pick_alive_server() {
+    local servers="$1"
+    local alive=""
+    while IFS= read -r line; do
+        local host_port=$(echo "$line" | grep -oP '@\K[^?]+')
+        local h="${host_port%%:*}"
+        local p="${host_port##*:}"
+        if check_server "$h" "$p"; then
+            alive="${alive}${line}"$'\n'
+        fi
+    done <<< "$servers"
+    echo "$alive"
+}
+
+do_start() {
+    do_stop
+
+    if ! fetch_servers; then
+        echo "Серверы не загружены!"
+        return 1
+    fi
+
+    # Ignore subscription-side selectors such as virt.host:1. They are not
+    # physical VLESS endpoints and cannot be connected to directly.
+    vless_servers=$(grep "^vless://" "$SERVERS_FILE" | grep -v '@virt\.host:1' | grep -E '[?&]security=(tls|reality)(&|#)')
+    if [ -z "$vless_servers" ]; then
+        echo "VLESS серверы не найдены!"
+        return 1
+    fi
+
+    server_count=$(echo "$vless_servers" | wc -l)
+    echo "CONNECTING" > "$STATUS_FILE"
+
+    if [ -f "/tmp/vpn-prescan-cache.txt" ] && [ -s "/tmp/vpn-prescan-cache.txt" ]; then
+        echo "Пробую из кеша prescan..."
+        while IFS='|' read -r host port name; do
+            [ -z "$host" ] && continue
+            [[ "$name" == ✗* ]] && continue
+            [ "$host" = "virt.host" ] && continue
+            matched=$(echo "$vless_servers" | grep -F "@${host}:${port}" | head -1)
+            if [ -n "$matched" ]; then
+                try_server "$matched" && return 0
+            fi
+        done < /tmp/vpn-prescan-cache.txt
+        echo "Кеш не помог"
+    fi
+
+    echo "Проверяю серверы..."
+    alive_servers=$(pick_alive_server "$vless_servers")
+    alive_count=$(echo "$alive_servers" | grep -c . 2>/dev/null)
+
+    if [ "$alive_count" -gt 0 ]; then
+        echo "Найдено живых: $alive_count из $server_count"
+        pick=$((RANDOM % alive_count + 1))
+        random_server=$(echo "$alive_servers" | sed -n "${pick}p")
+        try_server "$random_server" && return 0
+    fi
+
+    echo "Живые не ответили, пробую случайные..."
+    for i in 1 2 3; do
+        pick=$((RANDOM % server_count + 1))
+        random_server=$(echo "$vless_servers" | sed -n "${pick}p")
+        try_server "$random_server" && return 0
+    done
+
+    echo "Все серверы не ответили. Попробуй: vpn-toggle on"
+}
+
+case "$1" in
+    on)
+        if [ -f "$STATUS_FILE" ] && [ "$(cat $STATUS_FILE 2>/dev/null)" = "ON" ]; then
+            echo "VPN уже включён"
+        else
+            do_start
+        fi
+        ;;
+    off)
+        do_stop
+        notify-send -r 777004 -t 3000 "○  VPN OFF" "Connection closed"
+        echo "VPN ВЫКЛ"
+        ;;
+    toggle)
+        if [ -f "$STATUS_FILE" ] && [ "$(cat $STATUS_FILE 2>/dev/null)" = "ON" ]; then
+            do_stop
+            notify-send -r 777004 -t 3000 "○  VPN OFF" "Connection closed"
+            echo "VPN ВЫКЛ"
+        else
+            do_start
+        fi
+        ;;
+    on-for)
+        seconds="${2:-120}"
+        if [ -f "$STATUS_FILE" ] && [ "$(cat $STATUS_FILE 2>/dev/null)" = "ON" ]; then
+            echo "VPN уже включён"
+        else
+            setsid bash -c "/home/vlad/.local/bin/vpn-toggle on && sleep $seconds && /home/vlad/.local/bin/vpn-toggle off" </dev/null > /tmp/vpn-onfor.log 2>&1 &
+            echo "VPN включаю, автоотключение через ${seconds}с (фоновый таймер)"
+        fi
+        ;;
+    status)
+        if [ -f "$STATUS_FILE" ] && [ "$(cat $STATUS_FILE 2>/dev/null)" = "ON" ]; then
+            ip=$(check_internet && curl -x socks5h://127.0.0.1:10808 -s --max-time 3 https://ipwho.is 2>/dev/null || echo "?")
+            echo "ON → $ip"
+        else
+            echo "OFF"
+        fi
+        ;;
+    list)
+        fetch_servers
+        grep "^vless://" "$SERVERS_FILE" | python3 -c "
+import sys, urllib.parse
+for i, line in enumerate(sys.stdin, 1):
+    name = urllib.parse.unquote(line.strip().split('#')[1]) if '#' in line else '?'
+    print(f'{i}. {name}')
+"
+        ;;
+    connect)
+        if [ -z "$2" ]; then
+            echo "Укажи номер: vpn-toggle connect 5"
+            exit 1
+        fi
+        do_stop
+        sleep 2
+        if ! fetch_servers; then
+            echo "Серверы не загружены!"
+            exit 1
+        fi
+        vless_servers=$(grep "^vless://" "$SERVERS_FILE")
+        server_count=$(echo "$vless_servers" | wc -l)
+        if [ "$2" -gt "$server_count" ] || [ "$2" -lt 1 ] 2>/dev/null; then
+            echo "Нет сервера #$2 (всего: $server_count)"
+            exit 1
+        fi
+        echo "CONNECTING" > "$STATUS_FILE"
+        target=$(echo "$vless_servers" | sed -n "${2}p")
+        if ! try_server "$target"; then
+            echo "Сервер #$2 не отвечает"
+        fi
+        ;;
+    connect-url)
+        if [ -z "$2" ]; then
+            echo "Укажи ссылку (base64): vpn-toggle connect-url <base64>"
+            exit 1
+        fi
+        do_stop
+        sleep 1
+        url=$(echo "$2" | base64 -d 2>/dev/null)
+        if [ -z "$url" ]; then
+            echo "Ошибка декодирования ссылки"
+            exit 1
+        fi
+        echo "CONNECTING" > "$STATUS_FILE"
+        if try_server "$url"; then
+            exit 0
+        fi
+        echo "Выбранный сервер не отвечает, пробую другие..."
+        do_stop
+        sleep 1
+        if ! fetch_servers; then
+            echo "Серверы не загружены!"
+            exit 1
+        fi
+        reality_servers=$(grep "security=reality" "$SERVERS_FILE")
+        server_count=$(echo "$reality_servers" | wc -l)
+        for i in 1 2 3; do
+            pick=$((RANDOM % server_count + 1))
+            random_server=$(echo "$reality_servers" | sed -n "${pick}p")
+            try_server "$random_server" && exit 0
+        done
+        echo "Ни один сервер не ответил"
+        ;;
+    *) echo "Использование: vpn-toggle {on|off|toggle|status|list|on-for SEC|connect N|connect-url URL}" ;;
+esac

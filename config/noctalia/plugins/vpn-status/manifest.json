@@ -1,0 +1,30 @@
+{
+  "id": "vpn-status",
+  "name": "VPN Status",
+  "version": "1.0.0",
+  "minNoctaliaVersion": "4.4.3",
+  "author": "vlad",
+  "license": "MIT",
+  "repository": "https://github.com/Romalakino/dots",
+  "description": "Shows sing-box VPN status in the bar: disconnected/connecting/connected with country flag.",
+  "tags": [
+    "Bar",
+    "Network",
+    "Indicator"
+  ],
+  "entryPoints": {
+    "main": "Main.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "dependencies": {
+    "plugins": []
+  },
+  "metadata": {
+    "defaultSettings": {
+      "refreshInterval": 2000,
+      "showCountryFlag": true,
+      "showServerName": false,
+      "clickAction": "none"
+    }
+  }
+}

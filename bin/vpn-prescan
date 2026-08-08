@@ -1,0 +1,160 @@
+#!/bin/bash
+# Pre-scan VPN servers at startup — full REALITY test, cache results
+
+SERVERS_FILE="/tmp/vpn-local-servers.txt"
+CACHE_FILE="/tmp/vpn-prescan-cache.txt"
+LOCAL_SERVERS="/home/vlad/.local/share/vpn/servers.txt"
+SINGBOX_CONFIG="/home/vlad/.config/sing-box/config.json"
+LOG_FILE="/tmp/sing-box-prescan.log"
+VIA_GW="192.168.1.1"
+
+fetch_servers() {
+    cp "$LOCAL_SERVERS" "$SERVERS_FILE" 2>/dev/null
+    local count=$(wc -l < "$SERVERS_FILE" 2>/dev/null)
+    [ "$count" -gt 0 ] && return 0 || return 1
+}
+
+build_config() {
+    local host="$1" port="$2" uuid="$3" sni="$4" pbk="$5" sid="$6" fp="$7"
+    cat > "$SINGBOX_CONFIG" << EOF
+{
+  "log": { "level": "fatal" },
+  "dns": {
+    "servers": [
+      { "tag": "dns-direct", "type": "udp", "server": "1.1.1.1" }
+    ],
+    "rules": [
+      { "server": "dns-direct" }
+    ]
+  },
+  "inbounds": [
+    {
+      "type": "tun", "tag": "tun-in", "interface_name": "tun1",
+      "address": "172.19.1.1/30",
+      "auto_route": true, "stack": "system"
+    },
+    { "type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 10810 },
+    { "type": "http", "tag": "http-in", "listen": "127.0.0.1", "listen_port": 10811 }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "ip_cidr": ["$host/32"], "outbound": "direct" },
+      { "ip_is_private": true, "outbound": "direct" },
+      { "domain_suffix": "max.ru", "outbound": "direct" },
+      { "domain_suffix": "web.max.ru", "outbound": "direct" }
+    ],
+    "auto_detect_interface": true
+  },
+  "outbounds": [
+    {
+      "type": "vless", "tag": "proxy", "server": "$host", "server_port": $port, "uuid": "$uuid", "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true, "server_name": "$sni",
+        "utls": { "enabled": true, "fingerprint": "$fp" },
+        "reality": { "enabled": true, "public_key": "$pbk", "short_id": "$sid" }
+      }
+    },
+    { "type": "direct", "tag": "direct" }
+  ]
+}
+EOF
+}
+
+test_server_reality() {
+    local line="$1"
+    local parsed
+    parsed=$(python3 -c "
+import urllib.parse
+line = '''$line'''
+name = urllib.parse.unquote(line.split('#')[1]) if '#' in line else 'Unknown'
+params_str = line.split('?')[1].split('#')[0]
+params = dict(p.split('=',1) for p in params_str.split('&') if '=' in p)
+host_port = line.split('@')[1].split('?')[0]
+h, p = host_port.split(':')
+uuid = line.split('@')[0][8:]
+print(f'{h}|{p}|{uuid}|{params.get(\"sni\",\"\")}|{params.get(\"pbk\",\"\")}|{params.get(\"sid\",\"\")}|{params.get(\"fp\",\"firefox\")}|{name}')
+" 2>/dev/null)
+    
+    IFS='|' read -r host port uuid sni pbk sid fp name <<< "$parsed"
+    
+    build_config "$host" "$port" "$uuid" "$sni" "$pbk" "$sid" "$fp"
+    
+    sudo pkill -f "tun1" 2>/dev/null
+    sudo ip link del tun1 2>/dev/null
+    
+    sudo env ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true timeout 8 ~/.local/bin/sing-box run -c "$SINGBOX_CONFIG" > "$LOG_FILE" 2>&1 &
+    local pid=$!
+    
+    # Wait for tun1
+    for i in $(seq 1 6); do
+        sleep 1
+        if ip addr show tun1 2>/dev/null | grep -q "inet "; then
+            sleep 1
+            ip=$(curl -x socks5h://127.0.0.1:10810 -s --max-time 4 https://api.ipify.org 2>&1)
+            if [ $? -eq 0 ] && [ -n "$ip" ]; then
+                kill $pid 2>/dev/null
+                sudo ip link del tun1 2>/dev/null
+                echo "${host}|${port}|${name}" >> "$CACHE_FILE"
+                echo "✓ $name ($host)"
+                return 0
+            fi
+            break
+        fi
+    done
+    
+    kill $pid 2>/dev/null
+    sudo ip link del tun1 2>/dev/null
+    echo "✗ $name ($host)"
+    return 1
+}
+
+# Main
+rm -f "$CACHE_FILE"
+
+if ! fetch_servers; then
+    echo "vpn-prescan: Не удалось загрузить серверы"
+    exit 1
+fi
+
+server_count=$(wc -l < "$SERVERS_FILE")
+echo "vpn-prescan: Проверяю $server_count серверов..."
+
+# TCP ping first (fast) — на все протоколы
+alive=""
+while IFS= read -r line; do
+    host_port=$(echo "$line" | grep -oP '@\K[^?]+')
+    h="${host_port%%:*}"
+    p="${host_port##*:}"
+    timeout 2 bash -c "echo >/dev/tcp/$h/$p" 2>/dev/null && alive="${alive}${line}"$'\n'
+done < "$SERVERS_FILE"
+
+alive_count=$(echo "$alive" | grep -c . 2>/dev/null)
+echo "vpn-prescan: TCP alive: $alive_count из $server_count"
+
+# Обрабатываем все серверы разом
+echo "$alive" > /tmp/your-subscription-alive.txt
+python3 -c "
+import urllib.parse
+
+with open('/tmp/your-subscription-servers.txt') as f:
+    servers = [l.strip() for l in f if l.strip()]
+with open('/tmp/your-subscription-alive.txt') as f:
+    alive = set(l.strip() for l in f if l.strip())
+
+for line in servers:
+    try:
+        after_at = line.split('@', 1)[1]
+        host_port = after_at.split('?')[0].split('#')[0].rstrip('/')
+        h, p = host_port.split(':')
+        name = urllib.parse.unquote(line.split('#')[1]) if '#' in line else ''
+        marker = '' if line in alive else '✗ '
+        print(f'{h}|{p}|{marker}{name}')
+    except:
+        pass
+" >> "$CACHE_FILE"
+rm -f /tmp/your-subscription-alive.txt
+
+echo "vpn-prescan: TCP живые: $alive_count из $server_count — кешированы все"
+echo "Результат сохранён в $CACHE_FILE"
