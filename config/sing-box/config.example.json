@@ -1,40 +1,18 @@
 {
   "log": { "level": "warn" },
   "dns": {
-    "servers": [
-      { "tag": "dns-direct", "type": "udp", "server": "1.1.1.1" }
-    ],
-    "rules": [
-      { "server": "dns-direct" }
-    ]
+    "servers": [{ "tag": "dns-direct", "type": "udp", "server": "1.1.1.1" }]
   },
   "inbounds": [
-    {
-      "type": "tun", "tag": "tun-in", "interface_name": "tun0",
-      "address": "172.19.0.1/30",
-      "auto_route": true, "stack": "system"
-    },
+    { "type": "tun", "tag": "tun-in", "interface_name": "tun0",
+      "address": "172.19.0.1/30", "auto_route": true, "stack": "system" },
     { "type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 10808 },
     { "type": "http", "tag": "http-in", "listen": "127.0.0.1", "listen_port": 10809 }
   ],
+  "outbounds": [{ "type": "direct", "tag": "direct" }],
   "route": {
     "rules": [
-      { "action": "sniff" },
-      { "protocol": "dns", "action": "hijack-dns" },
-      { "ip_cidr": ["194.150.166.12/32"], "outbound": "direct" },
-      { "ip_is_private": true, "outbound": "direct" }
-    ],
-    "auto_detect_interface": true
-  },
-  "outbounds": [
-    {
-      "type": "vless", "tag": "proxy", "server": "194.150.166.12", "server_port": 443, "uuid": "f1c496bf-d2ab-45be-bc13-051d60d227b7", "flow": "xtls-rprx-vision",
-      "tls": {
-        "enabled": true, "server_name": "www.avito.ru",
-        "utls": { "enabled": true, "fingerprint": "firefox" },
-        "reality": { "enabled": true, "public_key": "b75SrHI--As9QxOVfRIPkGmGfXjs53CGAjbws2K99Rs", "short_id": "" }
-      }
-    },
-    { "type": "direct", "tag": "direct" }
-  ]
+      { "inbound": ["tun-in", "socks-in", "http-in"], "outbound": "direct" }
+    ]
+  }
 }

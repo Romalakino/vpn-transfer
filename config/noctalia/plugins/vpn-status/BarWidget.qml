@@ -71,16 +71,19 @@ Item {
                 spacing: Style.marginXS
 
                 NIcon {
+                    id: vpnIcon
                     icon: root.currentIcon
                     color: root.stateColor
 
-                    RotationAnimation on rotation {
+                    property real _spinner: 0
+                    rotation: root.vpnState === "connecting" ? vpnIcon._spinner : 0
+
+                    RotationAnimation on _spinner {
                         running: root.vpnState === "connecting"
                         from: 0
                         to: 360
                         duration: 1200
                         loops: Animation.Infinite
-                        onRunningChanged: if (!running) rotation = 0
                     }
                 }
 
