@@ -1,43 +1,56 @@
 #!/bin/bash
-# VPN auto-ping: measure latency to all servers, cache results
-# Called by systemd timer every hour + at boot
+# Hourly: check TCP alive → update prescan-cache, keep latency from prescan
 
 SERVERS="/home/vlad/.local/share/vpn/servers.txt"
-CACHE="/tmp/vpn-latency.json"
-TMP="/tmp/vpn-ping.tmp"
-
-> "$TMP"
-
-while IFS= read -r line; do
-    [[ "$line" != vless://* ]] && continue
-    host_port="${line#*@}"; host_port="${host_port%%\?*}"
-    host_port="${host_port%%\#*}"; host_port="${host_port%%/*}"
-    h="${host_port%%:*}"; p="${host_port##*:}"
-    [ -z "$h" ] || [ -z "$p" ] && continue
-    
-    ms=$(timeout 2 bash -c "
-        s=\$(date +%s%3N)
-        echo >/dev/tcp/$h/$p 2>/dev/null
-        e=\$(date +%s%3N)
-        echo \$(( e - s ))
-    " 2>/dev/null) || ms=""
-    echo "${h}:${p}|${ms}" >> "$TMP" &
-done < "$SERVERS"
-wait
+CACHE="/tmp/vpn-prescan-cache.txt"
 
 python3 <(cat << 'PYEOF'
-import json, os
-data = {}
-for line in open("/tmp/vpn-ping.tmp"):
-    parts = line.strip().split("|")
-    if len(parts) == 2:
-        key, ms = parts
-        data[key] = int(ms) if ms and ms.isdigit() else -1
-with open("/tmp/vpn-latency.json", "w") as f:
-    json.dump(data, f)
+import urllib.parse, socket, os, re
+
+old_latency = {}
+if os.path.exists("/tmp/vpn-prescan-cache.txt"):
+    for line in open("/tmp/vpn-prescan-cache.txt"):
+        p = line.strip().split("|", 2)
+        if len(p) >= 3:
+            key = f"{p[0]}:{p[1]}"
+            m = re.search(r'(\d+)ms', p[2])
+            if m: old_latency[key] = m.group(1)
+
+servers = []
+for line in open("/home/vlad/.local/share/vpn/servers.txt"):
+    line = line.strip()
+    if not line.startswith("vless://"): continue
+    try:
+        after_at = line.split("@", 1)[1]
+        host_port = after_at.split("?")[0].split("#")[0].rstrip("/")
+        h, p = host_port.split(":")
+        name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else ""
+        servers.append((h, int(p), name))
+    except: continue
+
+lines = []
+for h, p, name in servers:
+    alive = False
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect((h, p))
+        s.close()
+        alive = True
+    except:
+        pass
+    
+    key = f"{h}:{p}"
+    if alive:
+        ms = old_latency.get(key, "")
+        ms_str = f" {ms}ms" if ms else ""
+        lines.append(f"{h}|{p}|✓{ms_str} {name}")
+    else:
+        lines.append(f"{h}|{p}|✗ {name}")
+
+with open("/tmp/vpn-prescan-cache.txt", "w") as f:
+    f.write("\n".join(lines) + "\n")
+
+print(f"check: {len(servers)} servers")
 PYEOF
 )
-
-alive=$(grep -cP '\|[0-9]+' "$TMP" 2>/dev/null || echo 0)
-total=$(grep -c . "$TMP" 2>/dev/null || echo 0)
-echo "ping: $alive/$total alive"

@@ -1,5 +1,5 @@
 [Unit]
-Description=VPN server latency scan
+Description=VPN server check
 
 [Service]
 Type=oneshot

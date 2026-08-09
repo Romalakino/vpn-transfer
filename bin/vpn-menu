@@ -1,22 +1,22 @@
 #!/bin/bash
 set -euo pipefail
 
+SERVERS="/home/vlad/.local/share/vpn/servers.txt"
 CACHE="/tmp/vpn-prescan-cache.txt"
 LATENCY="/tmp/vpn-latency.json"
-SERVERS="/home/vlad/.local/share/vpn/servers.txt"
 STATUS="/tmp/vpn-status"
 FAV="$HOME/.config/vpn/favorites.txt"
-LAST_SRV="$HOME/.config/vpn/last-server.txt"
+CURR_IP="/tmp/vpn-server-ip"
 
-mkdir -p "$HOME/.config/vpn"
-touch "$FAV"
+mkdir -p "$HOME/.config/vpn"; touch "$FAV"
 
-[[ "$(cat $STATUS 2>/dev/null)" == "ON" ]] && echo -e "■  OFF — отключить VPN\n"
+{ cat "$STATUS" 2>/dev/null || echo "OFF"; } | python3 <(cat << 'PYEOF'
+import urllib.parse, json, os, re, sys
 
-python3 <(cat << 'PYEOF'
-import urllib.parse, json, os, sys
+status = sys.stdin.read().strip()
 
-cache, latency, favs = {}, {}, set()
+cache, favs = {}, set()
+current_ip = ""
 
 if os.path.exists("/tmp/vpn-prescan-cache.txt"):
     for line in open("/tmp/vpn-prescan-cache.txt"):
@@ -27,8 +27,10 @@ if os.path.exists("/tmp/vpn-latency.json"):
     latency = json.load(open("/tmp/vpn-latency.json"))
 
 if os.path.exists(os.path.expanduser("~/.config/vpn/favorites.txt")):
-    for line in open(os.path.expanduser("~/.config/vpn/favorites.txt")):
-        favs.add(line.strip())
+    favs = set(l.strip() for l in open(os.path.expanduser("~/.config/vpn/favorites.txt")))
+
+if os.path.exists("/tmp/vpn-server-ip"):
+    current_ip = open("/tmp/vpn-server-ip").read().strip()
 
 def flag(c):
     return {"GB":"🇬🇧","TR":"🇹🇷","NL":"🇳🇱","DE":"🇩🇪","US":"🇺🇸",
@@ -37,17 +39,22 @@ def flag(c):
             "IT":"🇮🇹","ES":"🇪🇸","PT":"🇵🇹","BR":"🇧🇷","AU":"🇦🇺",
             "JP":"🇯🇵","KR":"🇰🇷","SG":"🇸🇬","HK":"🇭🇰","IN":"🇮🇳",
             "CZ":"🇨🇿","AT":"🇦🇹","BE":"🇧🇪","RO":"🇷🇴","BG":"🇧🇬",
-            "SK":"🇸🇰","HU":"🇭🇺","LV":"🇱🇻","LT":"🇱🇹","EE":"🇪🇪",
-            "LU":"🇱🇺","IE":"🇮🇪","GR":"🇬🇷","CY":"🇨🇾","MT":"🇲🇹"}.get(c, "")
+            "RU":"🇷🇺","AL":"🇦🇱","AM":"🇦🇲","AZ":"🇦🇿","BY":"🇧🇾",
+            "KZ":"🇰🇿","MD":"🇲🇩","GE":"🇬🇪","VN":"🇻🇳","TH":"🇹🇭",
+            "ID":"🇮🇩","PH":"🇵🇭","MY":"🇲🇾","IS":"🇮🇸","LU":"🇱🇺",
+            "IE":"🇮🇪","GR":"🇬🇷","CY":"🇨🇾","MT":"🇲🇹","EE":"🇪🇪",
+            "LV":"🇱🇻","LT":"🇱🇹","SK":"🇸🇰","HU":"🇭🇺","RO":"🇷🇴",
+            "BG":"🇧🇬","SI":"🇸🇮","HR":"🇭🇷","RS":"🇷🇸","UA":"🇺🇦"}.get(c, "")
 
 def bar(ms):
-    if ms < 0: return ("⚫", "grey")
     if ms < 80:  return ("🟢", "green")
-    if ms < 150: return ("🟡", "yellow")
+    if ms < 200: return ("🟡", "yellow")
     return ("🔴", "red")
 
+if status == "ON":
+    print("■  OFF — отключить VPN")
+
 output = []
-idx = 0
 for line in open("/home/vlad/.local/share/vpn/servers.txt"):
     line = line.strip()
     if not line.startswith("vless://"): continue
@@ -58,12 +65,16 @@ for line in open("/home/vlad/.local/share/vpn/servers.txt"):
     except: continue
 
     key = f"{h}:{p}"
-    ms = latency.get(key, -1)
-    ping_dot, ping_color = bar(ms)
-    ping_label = f"{ms}ms" if ms > 0 else "—"
-    
     cached = cache.get(key, "")
     alive = "✓" if cached and not cached.startswith("✗") else " "
+    
+    ms = -1
+    if "ms" in cached:
+        m = re.search(r'(\d+)ms', cached)
+        if m: ms = int(m.group(1))
+    
+    ping_dot, ping_color = ("⚫", "grey") if ms < 0 else bar(ms)
+    ping_label = f"{ms}ms" if ms >= 0 else "—"
     
     cc, emoji = "", ""
     rest = name
@@ -81,13 +92,13 @@ for line in open("/home/vlad/.local/share/vpn/servers.txt"):
         rest = rest.replace(f" {speed_val}Mbps", "").strip()
 
     fav = "⭐" if line in favs else " "
+    active = "▶ " if h == current_ip else "  "
     
-    label = f"{alive} {fav} {emoji} {rest}"
+    label = f"{active}{alive} {fav} {emoji} {rest}"
     if speed: label += f"  <span size='small' color='#666'>{speed}</span>"
     label += f"  <span color='{ping_color}'>{ping_dot} {ping_label}</span>"
     
-    output.append((label, line, key, ms if ms > 0 else 999))
-    idx += 1
+    output.append((label, line, key, ms if ms >= 0 else 9999))
 
 output.sort(key=lambda x: x[3])
 
@@ -95,6 +106,6 @@ for label, url, key, ms in output:
     print(label)
 PYEOF
 ) | wofi --dmenu -i -p "Servers" \
-    --width 520 --height 380 \
+    --width 520 --height 420 \
     --style /home/vlad/.config/wofi/vpn.css \
     --lines 18 2>/dev/null

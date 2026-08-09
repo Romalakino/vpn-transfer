@@ -1,54 +1,76 @@
 #!/bin/bash
-# VPN pre-scan: TCP ping all servers → cache alive/dead status
+# VPN pre-scan: measure real latency BEFORE VPN connects
+# Called by systemd timer at boot + hourly
 
 SERVERS="/home/vlad/.local/share/vpn/servers.txt"
 CACHE="/tmp/vpn-prescan-cache.txt"
-TMP_ALIVE="/tmp/vpn-alive.tmp"
+LATENCY="/tmp/vpn-latency.json"
+TMP="/tmp/vpn-alive.tmp"
 
-rm -f "$CACHE" "$TMP_ALIVE"
+rm -f "$CACHE" "$TMP" >/dev/null 2>&1
 
 total=$(grep -c "^vless://" "$SERVERS" 2>/dev/null || echo 0)
-echo "🔍 Scanning $total servers..."
+echo "scan: $total servers"
 
-# Fast TCP check in parallel
+> "$TMP"
+
 while IFS= read -r line; do
     [[ "$line" != vless://* ]] && continue
-    host_port="${line#*@}"
-    host_port="${host_port%%\?*}"
-    host_port="${host_port%%\#*}"
-    host_port="${host_port%%/*}"
-    h="${host_port%%:*}"
-    p="${host_port##*:}"
-    timeout 2 bash -c "echo >/dev/tcp/$h/$p" 2>/dev/null && echo "$line" >> "$TMP_ALIVE" &
+    host_port="${line#*@}"; host_port="${host_port%%\?*}"
+    host_port="${host_port%%\#*}"; host_port="${host_port%%/*}"
+    h="${host_port%%:*}"; p="${host_port##*:}"
+    [ -z "$h" ] || [ -z "$p" ] && continue
+    
+    ms=$(ping -c 1 -W 1 "$h" 2>/dev/null | grep -oP 'time=\K[0-9.]+' | head -1)
+    alive=""
+    if [ -n "$ms" ]; then
+        alive="✓"
+        ms_int="${ms%.*}"
+    else
+        ms_int="-1"
+    fi
+    
+    echo "$line" >> "$TMP"
+    echo "${h}:${p}|${ms_int}" >> "${TMP}.lat" &
 done < "$SERVERS"
 wait
 
-alive_count=$(wc -l < "$TMP_ALIVE" 2>/dev/null || echo 0)
-echo "✅ Alive: $alive_count / $total"
+alive_count=$(grep -c . "$TMP" 2>/dev/null || echo 0)
 
-# Generate cache — all servers with markers
 python3 <(cat << 'PYEOF'
-import urllib.parse, os
+import urllib.parse, json
 
-alive = set()
-if os.path.exists("/tmp/vpn-alive.tmp"):
-    alive = set(l.strip() for l in open("/tmp/vpn-alive.tmp") if l.strip())
+data = {}
+for line in open("/tmp/vpn-alive.tmp.lat"):
+    p = line.strip().split("|")
+    if len(p) == 2:
+        key = p[0]
+        try: data[key] = int(float(p[1]))
+        except: data[key] = -1
 
-with open("/home/vlad/.local/share/vpn/servers.txt") as f:
-    for line in f:
-        line = line.strip()
-        if not line.startswith("vless://"):
-            continue
-        try:
-            after_at = line.split("@", 1)[1]
-            host_port = after_at.split("?")[0].split("#")[0].rstrip("/")
-            h, p = host_port.split(":")
-            name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else ""
-            status = "" if line in alive else "✗"
-            print(f"{h}|{p}|{status} {name}")
-        except:
-            pass
+with open("/tmp/vpn-latency.json", "w") as f:
+    json.dump(data, f)
+
+cache_lines = []
+for line in open("/home/vlad/.local/share/vpn/servers.txt"):
+    line = line.strip()
+    if not line.startswith("vless://"): continue
+    try:
+        after_at = line.split("@", 1)[1]
+        host_port = after_at.split("?")[0].split("#")[0].rstrip("/")
+        h, p = host_port.split(":")
+        name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else ""
+    except: continue
+    key = f"{h}:{p}"
+    ms = data.get(key, -1)
+    if ms > 0:
+        cache_lines.append(f"{h}|{p}|✓ {ms}ms {name}")
+    else:
+        cache_lines.append(f"{h}|{p}|✗ {name}")
+
+with open("/tmp/vpn-prescan-cache.txt", "w") as f:
+    f.write("\n".join(cache_lines) + "\n")
 PYEOF
-) > "$CACHE"
+)
 
-echo "💾 Cached → $CACHE"
+echo "done: $alive_count/$total alive (ICMP ping)"
