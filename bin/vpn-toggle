@@ -355,5 +355,32 @@ for i, line in enumerate(sys.stdin, 1):
         done
         echo "Ни один сервер не ответил"
         ;;
-    *) echo "Использование: vpn-toggle {on|off|toggle|status|list|on-for SEC|connect N|connect-url URL}" ;;
+    quick)
+        do_stop
+        sleep 1
+        last_url=$(cat "$LAST_SRV" 2>/dev/null)
+        if [ -z "$last_url" ]; then
+            do_start
+        else
+            echo "CONNECTING" > "$STATUS_FILE"
+            try_server "$last_url" && exit 0
+            echo "Last server failed, trying others..."
+            do_start
+        fi
+        ;;
+    save)
+        if [ -f "$STATUS_FILE" ] && [ "$(cat $STATUS_FILE 2>/dev/null)" = "ON" ]; then
+            vpn_ip=$(cat "$VPN_SERVER_FILE" 2>/dev/null)
+            vpn_port=$(grep -oP '"server_port":\s*\K\d+' "$SINGBOX_CONFIG" 2>/dev/null)
+            current=$(grep -F "@$vpn_ip:$vpn_port" "$LOCAL_SERVERS" 2>/dev/null | head -1)
+            if [ -n "$current" ]; then
+                echo "$current" > "$LAST_SRV"
+                fav_name=$(echo "$current" | grep -oP '#\K.*$' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null)
+                echo "💾 Saved: ${fav_name:-unknown}"
+            fi
+        else
+            echo "VPN not active"
+        fi
+        ;;
+    *) echo "Использование: vpn-toggle {on|off|toggle|quick|status|list|save|on-for SEC|connect N|connect-url URL}" ;;
 esac

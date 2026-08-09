@@ -1,40 +1,46 @@
 # vpn-transfer
 
-Sing-box TUN VPN manager with server picker for Linux (Wayland).
+Sing-box TUN VPN manager for Wayland (Niri/Sway). VLESS + Reality + xTLS.
 
 ## Features
 
-- **`vpn-toggle`** — on/off/toggle VPN + status
-- **`vpn-menu`** — wofi picker with live ping
-- **`vpn-prescan`** — ping all servers, sort by speed
-- **`vpn-recover`** — auto-restart TUN if down
-- **`sing-box-start`** — bootstrap sing-box with config
+| Command | Description |
+|---|---|
+| `vpn-toggle on/off/toggle` | Connect / disconnect |
+| `vpn-toggle quick` | Reconnect to last server |
+| `vpn-toggle save` | Save current server as default |
+| `vpn-menu` | Wofi picker with ping bars + favorites |
+| `vpn-prescan` | Fast TCP scan of all servers |
+| `vpn-ping` | Latency probe → JSON cache |
 
 ## Architecture
 
 ```
-~/.local/share/vpn/servers.txt    → VLESS proxy list (reality + xtls)
-~/.config/sing-box/config.json     → sing-box TUN config
-~/.local/bin/vpn-*                 → symlinks to scripts
+~/.local/share/vpn/servers.txt     → VLESS proxy list
+~/.config/sing-box/config.json     → sing-box TUN
+~/.config/vpn/favorites.txt        → favorite servers
+~/.config/vpn/last-server.txt      → last connected
+/tmp/vpn-latency.json              → ping cache (auto-updated hourly)
+/tmp/vpn-status                    → ON / OFF / CONNECTING
+/tmp/vpn-prescan-cache.txt         → alive/dead cache
 ```
 
-## Quick Start
+## Installation
 
-1. Drop your VLESS proxies into `~/.local/share/vpn/servers.txt`
-2. `sudo cp 99-singbox.conf /etc/sysctl.d/` (unprivileged TUN)
-3. `./bin/sing-box-start`
-4. `./bin/vpn-menu` — pick a server
-5. `./bin/vpn-toggle on`
+```bash
+# 1. Enable auto-ping
+systemctl --user enable --now vpn-ping.timer
+
+# 2. Allow unprivileged TUN
+sudo cp 99-singbox.conf /etc/sysctl.d/
+
+# 3. Drop your VLESS proxies
+cp servers.txt ~/.local/share/vpn/
+```
 
 ## Keybinds (Niri)
 
 | Keys | Action |
 |---|---|
-| Mod+U | VPN menu |
-| Mod+Alt+V | VPN toggle |
-
-## Dependencies
-
-- sing-box
-- wofi
-- python3
+| `Mod+U` | Server picker (wofi) |
+| `Mod+Alt+V` | VPN toggle |

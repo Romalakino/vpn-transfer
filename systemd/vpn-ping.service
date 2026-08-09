@@ -1,0 +1,6 @@
+[Unit]
+Description=VPN server latency scan
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/vpn-ping

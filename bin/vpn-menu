@@ -2,59 +2,74 @@
 set -euo pipefail
 
 CACHE="/tmp/vpn-prescan-cache.txt"
+LATENCY="/tmp/vpn-latency.json"
 SERVERS="/home/vlad/.local/share/vpn/servers.txt"
 STATUS="/tmp/vpn-status"
-WOFI_CFG="$HOME/.config/wofi/menu"
+FAV="$HOME/.config/vpn/favorites.txt"
+LAST_SRV="$HOME/.config/vpn/last-server.txt"
 
-[[ "$(cat $STATUS 2>/dev/null)" == "ON" ]] && echo -e "■  OFF — выключить VPN\n"
+mkdir -p "$HOME/.config/vpn"
+touch "$FAV"
+
+[[ "$(cat $STATUS 2>/dev/null)" == "ON" ]] && echo -e "■  OFF — отключить VPN\n"
 
 python3 <(cat << 'PYEOF'
-import urllib.parse, sys, os
+import urllib.parse, json, os, sys
 
-cache = {}
+cache, latency, favs = {}, {}, set()
+
 if os.path.exists("/tmp/vpn-prescan-cache.txt"):
     for line in open("/tmp/vpn-prescan-cache.txt"):
-        parts = line.strip().split("|", 2)
-        if len(parts) >= 3:
-            cache[f"{parts[0]}:{parts[1]}"] = parts[2]
+        p = line.strip().split("|", 2)
+        if len(p) >= 3: cache[f"{p[0]}:{p[1]}"] = p[2]
 
-servers = []
-with open("/home/vlad/.local/share/vpn/servers.txt") as f:
-    for line in f:
-        line = line.strip()
-        if not line.startswith("vless://"):
-            continue
-        try:
-            host_port = line.split("@", 1)[1].split("?")[0].split("#")[0].rstrip("/")
-            h, p = host_port.split(":")
-            name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else "Unknown"
-            servers.append((h, p, name, line))
-        except:
-            continue
+if os.path.exists("/tmp/vpn-latency.json"):
+    latency = json.load(open("/tmp/vpn-latency.json"))
 
-flag = lambda c: {"GB":"🇬🇧","TR":"🇹🇷","NL":"🇳🇱","DE":"🇩🇪","US":"🇺🇸",
-                   "FR":"🇫🇷","CA":"🇨🇦","CH":"🇨🇭","IR":"🇮🇷","SE":"🇸🇪",
-                   "NO":"🇳🇴","FI":"🇫🇮","DK":"🇩🇰","PL":"🇵🇱","UA":"🇺🇦",
-                   "IT":"🇮🇹","ES":"🇪🇸","PT":"🇵🇹","BR":"🇧🇷","AU":"🇦🇺",
-                   "JP":"🇯🇵","KR":"🇰🇷","SG":"🇸🇬","HK":"🇭🇰","IN":"🇮🇳",
-                   "CZ":"🇨🇿","AT":"🇦🇹","BE":"🇧🇪","RO":"🇷🇴","BG":"🇧🇬",
-                   "SK":"🇸🇰","HU":"🇭🇺","LV":"🇱🇻","LT":"🇱🇹","EE":"🇪🇪",
-                   "LU":"🇱🇺","IE":"🇮🇪","GR":"🇬🇷","CY":"🇨🇾","MT":"🇲🇹",
-                   "VN":"🇻🇳","TH":"🇹🇭","ID":"🇮🇩","PH":"🇵🇭","MY":"🇲🇾",
-                   "KZ":"🇰🇿","AZ":"🇦🇿","GE":"🇬🇪","AM":"🇦🇲","MD":"🇲🇩",
-                   "IS":"🇮🇸"}.get(c, "")
+if os.path.exists(os.path.expanduser("~/.config/vpn/favorites.txt")):
+    for line in open(os.path.expanduser("~/.config/vpn/favorites.txt")):
+        favs.add(line.strip())
 
-for h, p, name, url in servers:
+def flag(c):
+    return {"GB":"🇬🇧","TR":"🇹🇷","NL":"🇳🇱","DE":"🇩🇪","US":"🇺🇸",
+            "FR":"🇫🇷","CA":"🇨🇦","CH":"🇨🇭","IR":"🇮🇷","SE":"🇸🇪",
+            "NO":"🇳🇴","FI":"🇫🇮","DK":"🇩🇰","PL":"🇵🇱","UA":"🇺🇦",
+            "IT":"🇮🇹","ES":"🇪🇸","PT":"🇵🇹","BR":"🇧🇷","AU":"🇦🇺",
+            "JP":"🇯🇵","KR":"🇰🇷","SG":"🇸🇬","HK":"🇭🇰","IN":"🇮🇳",
+            "CZ":"🇨🇿","AT":"🇦🇹","BE":"🇧🇪","RO":"🇷🇴","BG":"🇧🇬",
+            "SK":"🇸🇰","HU":"🇭🇺","LV":"🇱🇻","LT":"🇱🇹","EE":"🇪🇪",
+            "LU":"🇱🇺","IE":"🇮🇪","GR":"🇬🇷","CY":"🇨🇾","MT":"🇲🇹"}.get(c, "")
+
+def bar(ms):
+    if ms < 0: return ("⚫", "grey")
+    if ms < 80:  return ("🟢", "green")
+    if ms < 150: return ("🟡", "yellow")
+    return ("🔴", "red")
+
+output = []
+idx = 0
+for line in open("/home/vlad/.local/share/vpn/servers.txt"):
+    line = line.strip()
+    if not line.startswith("vless://"): continue
+    try:
+        host_port = line.split("@",1)[1].split("?")[0].split("#")[0].rstrip("/")
+        h, p = host_port.split(":")
+        name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else "Unknown"
+    except: continue
+
     key = f"{h}:{p}"
+    ms = latency.get(key, -1)
+    ping_dot, ping_color = bar(ms)
+    ping_label = f"{ms}ms" if ms > 0 else "—"
+    
     cached = cache.get(key, "")
-    status = "✓" if cached and not cached.startswith("✗") else " "
-    cc = ""
-    emoji = ""
+    alive = "✓" if cached and not cached.startswith("✗") else " "
+    
+    cc, emoji = "", ""
     rest = name
     for word in name.split():
         if len(word) == 2 and word.isupper() and word.isalpha():
-            cc = word
-            emoji = flag(word)
+            cc, emoji = word, flag(word)
             break
     rest = name.replace(f" {cc}", "").replace(cc + " ", "").strip() if cc else name
     
@@ -64,15 +79,22 @@ for h, p, name, url in servers:
         speed_val = parts[0].strip().split()[-1]
         speed = f"{speed_val}Mbps"
         rest = rest.replace(f" {speed_val}Mbps", "").strip()
-        try:
-            rest = rest.rsplit(" ", 1)[0] if rest.split()[-1].replace(".","").isdigit() else rest
-        except:
-            pass
+
+    fav = "⭐" if line in favs else " "
     
-    label = f"{status} {emoji} {rest}"
-    if speed:
-        label += f"  <span size='small' color='#888'>({speed})</span>"
+    label = f"{alive} {fav} {emoji} {rest}"
+    if speed: label += f"  <span size='small' color='#666'>{speed}</span>"
+    label += f"  <span color='{ping_color}'>{ping_dot} {ping_label}</span>"
     
+    output.append((label, line, key, ms if ms > 0 else 999))
+    idx += 1
+
+output.sort(key=lambda x: x[3])
+
+for label, url, key, ms in output:
     print(label)
 PYEOF
-) | wofi --dmenu -i -p "VPN" --width 450 --height 320 2>/dev/null
+) | wofi --dmenu -i -p "Servers" \
+    --width 520 --height 380 \
+    --style /home/vlad/.config/wofi/vpn.css \
+    --lines 18 2>/dev/null
