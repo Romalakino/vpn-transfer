@@ -1,18 +1,26 @@
 #!/bin/bash
 # Hourly: real VLESS handshake check via temporary sing-box socks proxy.
 # Marks server ✓ only if it actually proxies traffic (not just TCP-open).
+# For alive servers, runs ChatGPT test via curl_cffi (browser TLS fingerprint).
 # Skips when VPN is ON (results unreliable). Old latency kept for alive servers.
 
 if [ "$(tr -d '\n' < /tmp/vpn-status 2>/dev/null)" = "ON" ]; then
     exit 0
 fi
 
-exec python3 - << 'PYEOF'
+GPT_TESTER="/tmp/gptvenv/bin/python"
+if [ ! -x "$GPT_TESTER" ]; then
+    python3 -m venv /tmp/gptvenv 2>/dev/null
+    /tmp/gptvenv/bin/pip install -q curl_cffi 2>/dev/null
+fi
+
+exec /tmp/gptvenv/bin/python - << 'PYEOF'
 import urllib.parse, socket, os, re, json, subprocess, time, tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 SBIN = "/home/vlad/.local/bin/sing-box"
 CACHE = "/tmp/vpn-prescan-cache.txt"
+GPT_RESULTS = "/tmp/vpn-gpt-cache.json"
 TEST_HOST = "https://icanhazip.com"
 BASE_PORT = 10820
 MAX_WORKERS = 6
@@ -35,6 +43,7 @@ for line in open("/home/vlad/.local/share/vpn/servers.txt"):
         host_port = line.split("@", 1)[1].split("?")[0].split("#")[0].rstrip("/")
         h, p = host_port.split(":")
         name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else ""
+        name = re.sub(r"\[GPT\]\s*", "", name)
         security = params.get("security", "tls")
         fp = params.get("fp", "firefox")
         sni = params.get("sni", h)
@@ -82,12 +91,13 @@ def check(e):
     proc = subprocess.Popen([SBIN, "run", "-c", cfg],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     ok = False
+    gpt = None
     try:
         t0 = time.time()
         deadline = t0 + 7
         while time.time() < deadline:
             if proc.poll() is not None:
-                return key, False, None
+                return key, False, None, None
             if socks_up(e["lport"]):
                 break
             time.sleep(0.15)
@@ -97,7 +107,8 @@ def check(e):
         if re.match(r"^\d+\.\d+\.\d+\.\d+$", out):
             ok = True
             ms = int((time.time() - t0) * 1000)
-            return key, True, ms
+            gpt = gpt_check(e["lport"])
+            return key, True, ms, gpt
     except:
         pass
     finally:
@@ -105,30 +116,47 @@ def check(e):
         try: proc.wait(timeout=2)
         except: proc.kill()
         os.unlink(cfg)
-    return key, ok, None
+    return key, ok, None, gpt
+
+def gpt_check(lport):
+    # ChatGPT via browser TLS fingerprint (curl_cffi impersonate) — curl gives fake 403
+    try:
+        from curl_cffi import requests
+        r = requests.get("https://chatgpt.com/", impersonate="chrome124", timeout=8,
+            proxies={"https": f"socks5h://127.0.0.1:{lport}",
+                     "http": f"socks5h://127.0.0.1:{lport}"})
+        return str(r.status_code)
+    except Exception as ex:
+        return "ERR:" + type(ex).__name__
 
 results = {}
 def run(e):
-    key, ok, ms = check(e)
-    results[key] = (ok, ms, e["name"])
+    key, ok, ms, gpt = check(e)
+    results[key] = (ok, ms, gpt, e["name"])
 
 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
     for e in servers:
         ex.submit(run, e)
 
 lines = []
+gpt_cache = {}
 for e in servers:
     key = f"{e['host']}:{e['sport']}"
-    ok, ms, name = results.get(key, (False, None, e["name"]))
+    ok, ms, gpt, name = results.get(key, (False, None, None, e["name"]))
+    gpt_cache[key] = gpt
     if ok:
         ms_str = f" {ms}ms" if ms is not None else ""
-        lines.append(f"{e['host']}|{e['sport']}|✓{ms_str} {name}")
+        gpt_str = " [GPT]" if gpt == "200" else ""
+        lines.append(f"{e['host']}|{e['sport']}|✓{ms_str}{gpt_str} {name}")
     else:
         lines.append(f"{e['host']}|{e['sport']}|✗ {name}")
 
 with open(CACHE, "w") as f:
     f.write("\n".join(lines) + "\n")
+with open(GPT_RESULTS, "w") as f:
+    json.dump(gpt_cache, f, indent=2)
 
-alive = sum(1 for ok, ms, name in results.values() if ok)
-print(f"check: {len(servers)}, handshake-ok: {alive}")
+alive = sum(1 for ok, ms, gpt, name in results.values() if ok)
+gpt_ok = sum(1 for ok, ms, gpt, name in results.values() if ok and gpt == "200")
+print(f"check: {len(servers)}, handshake-ok: {alive}, chatgpt-ok: {gpt_ok}")
 PYEOF
