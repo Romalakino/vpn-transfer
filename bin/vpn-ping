@@ -1,8 +1,9 @@
 #!/bin/bash
-# Hourly: real VLESS handshake check via temporary sing-box socks proxy.
-# Marks server ✓ only if it actually proxies traffic (not just TCP-open).
-# For alive servers, runs ChatGPT test via curl_cffi (browser TLS fingerprint).
-# Skips when VPN is ON (results unreliable). Old latency kept for alive servers.
+# Hourly: real server check. Three independent results per server:
+#   ping  = real network RTT (ICMP, fallback TCP-connect SYN-ACK) — честный пинг
+#   alive = ✓ только если VLESS-рукопожатие реально проксирует трафик
+#   gpt   = [GPT] если chatgpt.com отвечает 200 (curl_cffi, браузерный TLS)
+# Skips when VPN is ON (results unreliable).
 
 if [ "$(tr -d '\n' < /tmp/vpn-status 2>/dev/null)" = "ON" ]; then
     exit 0
@@ -25,12 +26,26 @@ TEST_HOST = "https://icanhazip.com"
 BASE_PORT = 10820
 MAX_WORKERS = 6
 
-old_data = {}
-if os.path.exists(CACHE):
-    for line in open(CACHE):
-        p = line.strip().split("|", 2)
-        if len(p) >= 3:
-            old_data[f"{p[0]}:{p[1]}"] = p[2]
+def measure_rtt(host, port):
+    # 1) ICMP ping — самый честный RTT
+    try:
+        out = subprocess.run(["ping", "-c", "1", "-W", "2", host],
+                             capture_output=True, text=True, timeout=4)
+        m = re.search(r"time=([0-9.]+)\s*ms", out.stdout)
+        if m:
+            return int(float(m.group(1)))
+    except:
+        pass
+    # 2) TCP SYN-ACK RTT (если ICMP заблокирован)
+    try:
+        s = socket.socket()
+        t0 = time.time()
+        s.settimeout(2)
+        s.connect((host, port))
+        s.close()
+        return int((time.time() - t0) * 1000)
+    except:
+        return None
 
 servers = []
 for line in open("/home/vlad/.local/share/vpn/servers.txt"):
@@ -76,47 +91,11 @@ def make_config(e):
 
 def socks_up(port):
     s = socket.socket()
-    s.settimeout(0.5)
+    s.settimeout(0.4)
     try:
         s.connect(("127.0.0.1", port)); s.close(); return True
     except:
         return False
-
-def check(e):
-    key = f"{e['host']}:{e['sport']}"
-    cfg = os.path.join(tempfile.gettempdir(), f"vpn-ping-{e['lport']}.json")
-    with open(cfg, "w") as f:
-        json.dump(make_config(e), f)
-
-    proc = subprocess.Popen([SBIN, "run", "-c", cfg],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    ok = False
-    gpt = None
-    try:
-        t0 = time.time()
-        deadline = t0 + 7
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                return key, False, None, None
-            if socks_up(e["lport"]):
-                break
-            time.sleep(0.15)
-        out = subprocess.run(
-            ["curl", "-x", f"socks5h://127.0.0.1:{e['lport']}", "-s", "--max-time", "5", TEST_HOST],
-            capture_output=True, text=True, timeout=8).stdout.strip()
-        if re.match(r"^\d+\.\d+\.\d+\.\d+$", out):
-            ok = True
-            ms = int((time.time() - t0) * 1000)
-            gpt = gpt_check(e["lport"])
-            return key, True, ms, gpt
-    except:
-        pass
-    finally:
-        proc.terminate()
-        try: proc.wait(timeout=2)
-        except: proc.kill()
-        os.unlink(cfg)
-    return key, ok, None, gpt
 
 def gpt_check(lport):
     # ChatGPT via browser TLS fingerprint (curl_cffi impersonate) — curl gives fake 403
@@ -129,10 +108,45 @@ def gpt_check(lport):
     except Exception as ex:
         return "ERR:" + type(ex).__name__
 
+def check(e):
+    key = f"{e['host']}:{e['sport']}"
+    rtt = measure_rtt(e["host"], e["sport"])
+    cfg = os.path.join(tempfile.gettempdir(), f"vpn-ping-{e['lport']}.json")
+    with open(cfg, "w") as f:
+        json.dump(make_config(e), f)
+
+    proc = subprocess.Popen([SBIN, "run", "-c", cfg],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    alive = False
+    gpt = None
+    try:
+        t0 = time.time()
+        deadline = t0 + 7
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return key, rtt, False, None
+            if socks_up(e["lport"]):
+                break
+            time.sleep(0.15)
+        out = subprocess.run(
+            ["curl", "-x", f"socks5h://127.0.0.1:{e['lport']}", "-s", "--max-time", "5", TEST_HOST],
+            capture_output=True, text=True, timeout=8).stdout.strip()
+        if re.match(r"^\d+\.\d+\.\d+\.\d+$", out):
+            alive = True
+            gpt = gpt_check(e["lport"])
+    except:
+        pass
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=2)
+        except: proc.kill()
+        os.unlink(cfg)
+    return key, rtt, alive, gpt
+
 results = {}
 def run(e):
-    key, ok, ms, gpt = check(e)
-    results[key] = (ok, ms, gpt, e["name"])
+    key, rtt, alive, gpt = check(e)
+    results[key] = (rtt, alive, gpt, e["name"])
 
 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
     for e in servers:
@@ -142,12 +156,12 @@ lines = []
 gpt_cache = {}
 for e in servers:
     key = f"{e['host']}:{e['sport']}"
-    ok, ms, gpt, name = results.get(key, (False, None, None, e["name"]))
+    rtt, alive, gpt, name = results.get(key, (None, False, None, e["name"]))
     gpt_cache[key] = gpt
-    if ok:
-        ms_str = f" {ms}ms" if ms is not None else ""
+    if alive:
+        rtt_str = f" {rtt}ms" if rtt is not None else ""
         gpt_str = " [GPT]" if gpt == "200" else ""
-        lines.append(f"{e['host']}|{e['sport']}|✓{ms_str}{gpt_str} {name}")
+        lines.append(f"{e['host']}|{e['sport']}|✓{rtt_str}{gpt_str} {name}")
     else:
         lines.append(f"{e['host']}|{e['sport']}|✗ {name}")
 
@@ -156,7 +170,7 @@ with open(CACHE, "w") as f:
 with open(GPT_RESULTS, "w") as f:
     json.dump(gpt_cache, f, indent=2)
 
-alive = sum(1 for ok, ms, gpt, name in results.values() if ok)
-gpt_ok = sum(1 for ok, ms, gpt, name in results.values() if ok and gpt == "200")
+alive = sum(1 for rtt, ok, gpt, name in results.values() if ok)
+gpt_ok = sum(1 for rtt, ok, gpt, name in results.values() if ok and gpt == "200")
 print(f"check: {len(servers)}, handshake-ok: {alive}, chatgpt-ok: {gpt_ok}")
 PYEOF
