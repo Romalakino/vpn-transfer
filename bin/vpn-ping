@@ -108,6 +108,24 @@ def gpt_check(lport):
     except Exception as ex:
         return "ERR:" + type(ex).__name__
 
+# Countries where Gemini geo-blocks (RU/BY and others)
+GEMINI_BLOCKED = {"RU", "BY", "CN", "IR", "KP", "CU", "SY", "VE"}
+
+def gemini_check(lport):
+    # Gemini blocks by exit-IP country (client-side, page HTML is identical).
+    # Check exit country via ip-api.com through the socks proxy.
+    try:
+        from curl_cffi import requests
+        r = requests.get("http://ip-api.com/json/", timeout=6,
+            proxies={"https": f"socks5h://127.0.0.1:{lport}",
+                     "http": f"socks5h://127.0.0.1:{lport}"})
+        cc = r.json().get("countryCode", "")
+        if cc in GEMINI_BLOCKED:
+            return "BLOCK"
+        return "OK" if cc else "ERR"
+    except Exception:
+        return "ERR"
+
 def check(e):
     key = f"{e['host']}:{e['sport']}"
     rtt = measure_rtt(e["host"], e["sport"])
@@ -119,12 +137,13 @@ def check(e):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     alive = False
     gpt = None
+    gem = None
     try:
         t0 = time.time()
         deadline = t0 + 7
         while time.time() < deadline:
             if proc.poll() is not None:
-                return key, rtt, False, None
+                return key, rtt, False, None, None
             if socks_up(e["lport"]):
                 break
             time.sleep(0.15)
@@ -134,6 +153,7 @@ def check(e):
         if re.match(r"^\d+\.\d+\.\d+\.\d+$", out):
             alive = True
             gpt = gpt_check(e["lport"])
+            gem = gemini_check(e["lport"])
     except:
         pass
     finally:
@@ -141,12 +161,12 @@ def check(e):
         try: proc.wait(timeout=2)
         except: proc.kill()
         os.unlink(cfg)
-    return key, rtt, alive, gpt
+    return key, rtt, alive, gpt, gem
 
 results = {}
 def run(e):
-    key, rtt, alive, gpt = check(e)
-    results[key] = (rtt, alive, gpt, e["name"])
+    key, rtt, alive, gpt, gem = check(e)
+    results[key] = (rtt, alive, gpt, gem, e["name"])
 
 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
     for e in servers:
@@ -154,14 +174,17 @@ with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
 
 lines = []
 gpt_cache = {}
+gem_cache = {}
 for e in servers:
     key = f"{e['host']}:{e['sport']}"
-    rtt, alive, gpt, name = results.get(key, (None, False, None, e["name"]))
+    rtt, alive, gpt, gem, name = results.get(key, (None, False, None, None, e["name"]))
     gpt_cache[key] = gpt
+    gem_cache[key] = gem
     if alive:
         rtt_str = f" {rtt}ms" if rtt is not None else ""
         gpt_str = " [GPT]" if gpt == "200" else ""
-        lines.append(f"{e['host']}|{e['sport']}|✓{rtt_str}{gpt_str} {name}")
+        gem_str = " [GEM]" if gem == "OK" else ""
+        lines.append(f"{e['host']}|{e['sport']}|✓{rtt_str}{gpt_str}{gem_str} {name}")
     else:
         lines.append(f"{e['host']}|{e['sport']}|✗ {name}")
 
@@ -169,8 +192,11 @@ with open(CACHE, "w") as f:
     f.write("\n".join(lines) + "\n")
 with open(GPT_RESULTS, "w") as f:
     json.dump(gpt_cache, f, indent=2)
+with open("/tmp/vpn-gemini-cache.json", "w") as f:
+    json.dump(gem_cache, f, indent=2)
 
-alive = sum(1 for rtt, ok, gpt, name in results.values() if ok)
-gpt_ok = sum(1 for rtt, ok, gpt, name in results.values() if ok and gpt == "200")
-print(f"check: {len(servers)}, handshake-ok: {alive}, chatgpt-ok: {gpt_ok}")
+alive = sum(1 for rtt, ok, gpt, gem, name in results.values() if ok)
+gpt_ok = sum(1 for rtt, ok, gpt, gem, name in results.values() if ok and gpt == "200")
+gem_ok = sum(1 for rtt, ok, gpt, gem, name in results.values() if ok and gem == "OK")
+print(f"check: {len(servers)}, handshake-ok: {alive}, chatgpt-ok: {gpt_ok}, gemini-ok: {gem_ok}")
 PYEOF

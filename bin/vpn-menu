@@ -22,6 +22,11 @@ if os.path.exists("/tmp/vpn-prescan-cache.txt"):
         p = line.strip().split("|", 2)
         if len(p) >= 3: cache[f"{p[0]}:{p[1]}"] = p[2]
 
+gemini_cache = {}
+if os.path.exists("/tmp/vpn-gemini-cache.json"):
+    import json as _j
+    gemini_cache = _j.load(open("/tmp/vpn-gemini-cache.json"))
+
 current_ip = open("/tmp/vpn-server-ip").read().strip() if os.path.exists("/tmp/vpn-server-ip") else ""
 
 def flag(c):
@@ -57,6 +62,8 @@ for line in open("/home/vlad/.local/share/vpn/servers.txt"):
     
     # GPT marker from cache (not from server name)
     gpt = "[GPT]" if cached and " [GPT]" in cached else ""
+    # Gemini marker from cache
+    gem = "[GEM]" if gemini_cache.get(f"{h}:{p}") == "OK" else ""
     
     # Clean name: strip technical tags [OpenRay]/[BL]/[vl-re-ra]/[260815...] etc
     clean_name = name
@@ -96,8 +103,9 @@ for line in open("/home/vlad/.local/share/vpn/servers.txt"):
     ping_str = f"<span foreground='{ping_color}'>● {ping_fixed}</span>"
     
     gpt_str = f" <span foreground='#4CAF50'>{gpt}</span>" if gpt else ""
+    gem_str = f" <span foreground='#7C4DFF'>{gem}</span>" if gem else ""
     
-    name_part = f"{alive_mark}{active} {emoji}  {clean_name}{gpt_str}"
+    name_part = f"{alive_mark}{active} {emoji}  {clean_name}{gpt_str}{gem_str}"
     name_plain = re.sub(r'<[^>]+>', '', name_part)
     
     emoji_cells = sum(1 for c in name_plain if ord(c) > 0x2500)
