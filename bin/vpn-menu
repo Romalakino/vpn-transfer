@@ -2,35 +2,27 @@
 set -euo pipefail
 
 SERVERS="/home/vlad/.local/share/vpn/servers.txt"
-CACHE="/tmp/vpn-prescan-cache.txt"
-LATENCY="/tmp/vpn-latency.json"
 STATUS="/tmp/vpn-status"
-FAV="$HOME/.config/vpn/favorites.txt"
-CURR_IP="/tmp/vpn-server-ip"
+MAP="/tmp/vpn-menu-map.txt"
 
-mkdir -p "$HOME/.config/vpn"; touch "$FAV"
+> "$MAP"
 
-{ cat "$STATUS" 2>/dev/null || echo "OFF"; } | python3 <(cat << 'PYEOF'
-import urllib.parse, json, os, re, sys
+off_line=""
+[ "$(tr -d '\n' < "$STATUS" 2>/dev/null)" = "ON" ] && off_line="■  OFF — отключить VPN"
+echo "__OFF_MARKER__=$off_line" >> "$MAP"
 
-status = sys.stdin.read().strip()
+{
+    [ -n "$off_line" ] && echo "$off_line"
+    python3 /dev/stdin << 'PYEOF'
+import urllib.parse, re, os
 
-cache, favs = {}, set()
-current_ip = ""
-
+cache = {}
 if os.path.exists("/tmp/vpn-prescan-cache.txt"):
     for line in open("/tmp/vpn-prescan-cache.txt"):
         p = line.strip().split("|", 2)
         if len(p) >= 3: cache[f"{p[0]}:{p[1]}"] = p[2]
 
-if os.path.exists("/tmp/vpn-latency.json"):
-    latency = json.load(open("/tmp/vpn-latency.json"))
-
-if os.path.exists(os.path.expanduser("~/.config/vpn/favorites.txt")):
-    favs = set(l.strip() for l in open(os.path.expanduser("~/.config/vpn/favorites.txt")))
-
-if os.path.exists("/tmp/vpn-server-ip"):
-    current_ip = open("/tmp/vpn-server-ip").read().strip()
+current_ip = open("/tmp/vpn-server-ip").read().strip() if os.path.exists("/tmp/vpn-server-ip") else ""
 
 def flag(c):
     return {"GB":"🇬🇧","TR":"🇹🇷","NL":"🇳🇱","DE":"🇩🇪","US":"🇺🇸",
@@ -40,72 +32,119 @@ def flag(c):
             "JP":"🇯🇵","KR":"🇰🇷","SG":"🇸🇬","HK":"🇭🇰","IN":"🇮🇳",
             "CZ":"🇨🇿","AT":"🇦🇹","BE":"🇧🇪","RO":"🇷🇴","BG":"🇧🇬",
             "RU":"🇷🇺","AL":"🇦🇱","AM":"🇦🇲","AZ":"🇦🇿","BY":"🇧🇾",
-            "KZ":"🇰🇿","MD":"🇲🇩","GE":"🇬🇪","VN":"🇻🇳","TH":"🇹🇭",
-            "ID":"🇮🇩","PH":"🇵🇭","MY":"🇲🇾","IS":"🇮🇸","LU":"🇱🇺",
-            "IE":"🇮🇪","GR":"🇬🇷","CY":"🇨🇾","MT":"🇲🇹","EE":"🇪🇪",
-            "LV":"🇱🇻","LT":"🇱🇹","SK":"🇸🇰","HU":"🇭🇺","RO":"🇷🇴",
-            "BG":"🇧🇬","SI":"🇸🇮","HR":"🇭🇷","RS":"🇷🇸","UA":"🇺🇦"}.get(c, "")
+            "KZ":"🇰🇿","MD":"🇲🇩","GE":"🇬🇪","LU":"🇱🇺","EE":"🇪🇪",
+            "LV":"🇱🇻","LT":"🇱🇹","SK":"🇸🇰","HU":"🇭🇺","SI":"🇸🇮",
+            "HR":"🇭🇷","RS":"🇷🇸","CY":"🇨🇾","MT":"🇲🇹","IS":"🇮🇸"}.get(c, "")
 
-def bar(ms):
-    if ms < 80:  return ("🟢", "green")
-    if ms < 200: return ("🟡", "yellow")
-    return ("🔴", "red")
+map_file = open("/tmp/vpn-menu-map.txt", "a")
 
-if status == "ON":
-    print("■  OFF — отключить VPN")
-
-output = []
+servers = []
 for line in open("/home/vlad/.local/share/vpn/servers.txt"):
     line = line.strip()
     if not line.startswith("vless://"): continue
     try:
-        host_port = line.split("@",1)[1].split("?")[0].split("#")[0].rstrip("/")
-        h, p = host_port.split(":")
-        name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else "Unknown"
+        hp = line.split("@",1)[1].split("?")[0].split("#")[0].rstrip("/")
+        h, p = hp.split(":")
+        name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else "?"
     except: continue
 
-    key = f"{h}:{p}"
-    cached = cache.get(key, "")
-    alive = "✓" if cached and not cached.startswith("✗") else " "
+    cached = cache.get(f"{h}:{p}", "")
+    alive = not cached.startswith("✗") if cached else True
     
-    ms = -1
-    if "ms" in cached:
-        m = re.search(r'(\d+)ms', cached)
-        if m: ms = int(m.group(1))
-    
-    ping_dot, ping_color = ("⚫", "grey") if ms < 0 else bar(ms)
+    ms = int(re.search(r'(\d+)ms', cached).group(1)) if cached and "ms" in cached else -1
+    ping_color = "grey" if ms < 0 else ("green" if ms < 80 else ("yellow" if ms < 200 else "red"))
     ping_label = f"{ms}ms" if ms >= 0 else "—"
     
-    cc, emoji = "", ""
-    rest = name
-    for word in name.split():
-        if len(word) == 2 and word.isupper() and word.isalpha():
-            cc, emoji = word, flag(word)
-            break
-    rest = name.replace(f" {cc}", "").replace(cc + " ", "").strip() if cc else name
+    # GPT marker from cache (not from server name)
+    gpt = "[GPT]" if cached and " [GPT]" in cached else ""
     
-    speed = ""
-    if "Mbps" in rest:
-        parts = rest.rsplit("Mbps", 1)
-        speed_val = parts[0].strip().split()[-1]
-        speed = f"{speed_val}Mbps"
-        rest = rest.replace(f" {speed_val}Mbps", "").strip()
-
-    fav = "⭐" if line in favs else " "
-    active = "▶ " if h == current_ip else "  "
+    # Clean name: strip technical tags [OpenRay]/[BL]/[vl-re-ra]/[260815...] etc
+    clean_name = name
+    words = name.split()
     
-    label = f"{active}{alive} {fav} {emoji} {rest}"
-    if speed: label += f"  <span size='small' color='#666'>{speed}</span>"
-    label += f"  <span color='{ping_color}'>{ping_dot} {ping_label}</span>"
+    # Find flag emoji anywhere in name (also inside brackets like [🇧🇬])
+    emoji = ""
+    for word in words:
+        for c in word:
+            if ord(c) >= 0x1F1E6 and ord(c) <= 0x1F1FF:
+                if len(word) >= 2 and 0x1F1E6 <= ord(word[0]) <= 0x1F1FF:
+                    emoji = word[:2]
+                    clean_name = name.replace(word, "", 1).strip()
+                break
     
-    output.append((label, line, key, ms if ms >= 0 else 9999))
+    # If no emoji flag, look for 2-letter country code
+    if not emoji:
+        for word in words:
+            if len(word) == 2 and word.isupper() and word.isalpha():
+                emoji = flag(word)
+                clean_name = name.replace(word, "", 1).strip()
+                break
+    
+    # Remove brackets tags and special chars
+    clean_name = re.sub(r'\[[^\]]*\]', '', clean_name)
+    clean_name = re.sub(r'[\^~]+', '', clean_name).strip()
+    # Collapse multiple spaces
+    clean_name = re.sub(r'\s{2,}', ' ', clean_name).strip()
+    # Fallback: if name became empty, show original minus GPT tag
+    if not clean_name:
+        clean_name = name.replace("[GPT]", "").strip()
+    
+    active = "▶" if h == current_ip else " "
+    alive_mark = "✓" if alive else "✗"
+    
+    ping_fixed = f"{ms:>3}ms" if ms >= 0 else "  — "
+    ping_str = f"<span foreground='{ping_color}'>● {ping_fixed}</span>"
+    
+    gpt_str = f" <span foreground='#4CAF50'>{gpt}</span>" if gpt else ""
+    
+    name_part = f"{alive_mark}{active} {emoji}  {clean_name}{gpt_str}"
+    name_plain = re.sub(r'<[^>]+>', '', name_part)
+    
+    emoji_cells = sum(1 for c in name_plain if ord(c) > 0x2500)
+    display_len = len(name_plain) + emoji_cells
+    
+    # Pad name to fixed column, then ping. No trailing spaces → no scrollbar.
+    col = 52
+    pad = max(1, col - display_len)
+    
+    label = f"{name_part}{' ' * pad}{ping_str}"
+    
+    map_file.write(f"{label}\t{line}\n")
+    servers.append((ms if ms >= 0 else 9999, label))
 
-output.sort(key=lambda x: x[3])
-
-for label, url, key, ms in output:
+servers.sort(key=lambda x: x[0])
+for _, label in servers:
     print(label)
+
+map_file.close()
 PYEOF
-) | wofi --dmenu -i -p "Servers" \
-    --width 520 --height 420 \
+} | wofi --dmenu -i -p "Servers" \
+    --width 600 --height 440 \
     --style /home/vlad/.config/wofi/vpn.css \
-    --lines 18 2>/dev/null
+    2>/dev/null | {
+    read -r choice
+    [ -z "$choice" ] && exit 0
+    
+    if echo "$choice" | grep -q "^■"; then
+        /home/vlad/.local/bin/vpn-toggle off
+        exit 0
+    fi
+    
+    # Strip Pango markup from wofi's output: remove <span...> and </span>
+    clean_choice=$(echo "$choice" | sed 's/<[^>]*>//g')
+    
+    # Search map: compare clean labels
+    url=""
+    while IFS=$'\t' read -r map_label map_url; do
+        map_clean=$(echo "$map_label" | sed 's/<[^>]*>//g')
+        if [ "$map_clean" = "$clean_choice" ]; then
+            url="$map_url"
+            break
+        fi
+    done < /tmp/vpn-menu-map.txt
+    
+    if [ -n "$url" ]; then
+        b64=$(echo "$url" | base64 -w0)
+        /home/vlad/.local/bin/vpn-toggle connect-url "$b64"
+    fi
+}
