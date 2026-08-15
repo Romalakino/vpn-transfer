@@ -1,56 +1,134 @@
 #!/bin/bash
-# Hourly: check TCP alive → update prescan-cache, keep latency from prescan
+# Hourly: real VLESS handshake check via temporary sing-box socks proxy.
+# Marks server ✓ only if it actually proxies traffic (not just TCP-open).
+# Skips when VPN is ON (results unreliable). Old latency kept for alive servers.
 
-SERVERS="/home/vlad/.local/share/vpn/servers.txt"
-CACHE="/tmp/vpn-prescan-cache.txt"
+if [ "$(tr -d '\n' < /tmp/vpn-status 2>/dev/null)" = "ON" ]; then
+    exit 0
+fi
 
-python3 <(cat << 'PYEOF'
-import urllib.parse, socket, os, re
+exec python3 - << 'PYEOF'
+import urllib.parse, socket, os, re, json, subprocess, time, tempfile
+from concurrent.futures import ThreadPoolExecutor
 
-old_latency = {}
-if os.path.exists("/tmp/vpn-prescan-cache.txt"):
-    for line in open("/tmp/vpn-prescan-cache.txt"):
+SBIN = "/home/vlad/.local/bin/sing-box"
+CACHE = "/tmp/vpn-prescan-cache.txt"
+TEST_HOST = "https://icanhazip.com"
+BASE_PORT = 10820
+MAX_WORKERS = 6
+
+old_data = {}
+if os.path.exists(CACHE):
+    for line in open(CACHE):
         p = line.strip().split("|", 2)
         if len(p) >= 3:
-            key = f"{p[0]}:{p[1]}"
-            m = re.search(r'(\d+)ms', p[2])
-            if m: old_latency[key] = m.group(1)
+            old_data[f"{p[0]}:{p[1]}"] = p[2]
 
 servers = []
 for line in open("/home/vlad/.local/share/vpn/servers.txt"):
     line = line.strip()
     if not line.startswith("vless://"): continue
     try:
-        after_at = line.split("@", 1)[1]
-        host_port = after_at.split("?")[0].split("#")[0].rstrip("/")
+        uuid = line.split("@")[0][8:]
+        params_str = line.split("?")[1].split("#")[0]
+        params = dict(kv.split("=", 1) for kv in params_str.split("&") if "=" in kv)
+        host_port = line.split("@", 1)[1].split("?")[0].split("#")[0].rstrip("/")
         h, p = host_port.split(":")
         name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else ""
-        servers.append((h, int(p), name))
-    except: continue
+        security = params.get("security", "tls")
+        fp = params.get("fp", "firefox")
+        sni = params.get("sni", h)
+        servers.append({
+            "host": h, "sport": int(p), "name": name, "uuid": uuid,
+            "security": security, "fp": fp, "sni": sni,
+            "pbk": params.get("pbk", ""), "sid": params.get("sid", ""),
+        })
+    except:
+        continue
 
-lines = []
-for h, p, name in servers:
-    alive = False
+for i, e in enumerate(servers):
+    e["lport"] = BASE_PORT + i
+
+def make_config(e):
+    tls = {"enabled": True, "server_name": e["sni"],
+           "utls": {"enabled": True, "fingerprint": e["fp"]}}
+    if e["security"] == "reality":
+        tls["reality"] = {"enabled": True, "public_key": e["pbk"], "short_id": e["sid"]}
+    return {
+        "log": {"level": "error"},
+        "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": e["lport"]}],
+        "outbounds": [{
+            "type": "vless", "tag": "proxy",
+            "server": e["host"], "server_port": e["sport"],
+            "uuid": e["uuid"], "flow": "xtls-rprx-vision",
+            "tls": tls,
+        }],
+    }
+
+def socks_up(port):
+    s = socket.socket()
+    s.settimeout(0.5)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
-        s.connect((h, p))
-        s.close()
-        alive = True
+        s.connect(("127.0.0.1", port)); s.close(); return True
+    except:
+        return False
+
+def check(e):
+    key = f"{e['host']}:{e['sport']}"
+    cfg = os.path.join(tempfile.gettempdir(), f"vpn-ping-{e['lport']}.json")
+    with open(cfg, "w") as f:
+        json.dump(make_config(e), f)
+
+    proc = subprocess.Popen([SBIN, "run", "-c", cfg],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ok = False
+    try:
+        t0 = time.time()
+        deadline = t0 + 7
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return key, False, None
+            if socks_up(e["lport"]):
+                break
+            time.sleep(0.15)
+        out = subprocess.run(
+            ["curl", "-x", f"socks5h://127.0.0.1:{e['lport']}", "-s", "--max-time", "5", TEST_HOST],
+            capture_output=True, text=True, timeout=8).stdout.strip()
+        if re.match(r"^\d+\.\d+\.\d+\.\d+$", out):
+            ok = True
+            ms = int((time.time() - t0) * 1000)
+            return key, True, ms
     except:
         pass
-    
-    key = f"{h}:{p}"
-    if alive:
-        ms = old_latency.get(key, "")
-        ms_str = f" {ms}ms" if ms else ""
-        lines.append(f"{h}|{p}|✓{ms_str} {name}")
-    else:
-        lines.append(f"{h}|{p}|✗ {name}")
+    finally:
+        proc.terminate()
+        try: proc.wait(timeout=2)
+        except: proc.kill()
+        os.unlink(cfg)
+    return key, ok, None
 
-with open("/tmp/vpn-prescan-cache.txt", "w") as f:
+results = {}
+def run(e):
+    key, ok, ms = check(e)
+    results[key] = (ok, ms, e["name"])
+
+with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+    for e in servers:
+        ex.submit(run, e)
+
+lines = []
+for e in servers:
+    key = f"{e['host']}:{e['sport']}"
+    ok, ms, name = results.get(key, (False, None, e["name"]))
+    if ok:
+        ms_str = f" {ms}ms" if ms is not None else ""
+        lines.append(f"{e['host']}|{e['sport']}|✓{ms_str} {name}")
+    else:
+        lines.append(f"{e['host']}|{e['sport']}|✗ {name}")
+
+with open(CACHE, "w") as f:
     f.write("\n".join(lines) + "\n")
 
-print(f"check: {len(servers)} servers")
+alive = sum(1 for ok, ms, name in results.values() if ok)
+print(f"check: {len(servers)}, handshake-ok: {alive}")
 PYEOF
-)
