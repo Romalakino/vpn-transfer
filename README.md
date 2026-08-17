@@ -2,6 +2,8 @@
 
 Sing-box TUN VPN manager for Wayland (Niri/Sway). VLESS + Reality + xTLS.
 
+> 📖 **Полный гайд по системе: архитектура, скрипты, поиск и проверка серверов, ChatGPT/Gemini-тесты** → **[VPN-GUIDE.md](VPN-GUIDE.md)**
+
 ## Features
 
 | Command | Description |

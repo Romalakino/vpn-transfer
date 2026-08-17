@@ -22,19 +22,45 @@ fetch_servers() {
 }
 
 build_config() {
-    local host="$1" port="$2" uuid="$3" sni="$4" pbk="$5" sid="$6" fp="$7" security="$8"
+    local host="$1" port="$2" uuid="$3" sni="$4" pbk="$5" sid="$6" fp="$7" security="$8" type="$9" ws_host="${10}" ws_path="${11}"
     if [ "$security" = "reality" ]; then
         tls_block="\"tls\": {
         \"enabled\": true, \"server_name\": \"$sni\",
         \"utls\": { \"enabled\": true, \"fingerprint\": \"$fp\" },
         \"reality\": { \"enabled\": true, \"public_key\": \"$pbk\", \"short_id\": \"$sid\" }
       }"
-    else
+    elif [ "$security" = "tls" ]; then
         tls_block="\"tls\": {
         \"enabled\": true, \"server_name\": \"$sni\",
         \"utls\": { \"enabled\": true, \"fingerprint\": \"$fp\" }
       }"
+    else
+        tls_block=""
     fi
+
+    # Build transport block
+    transport_block=""
+    if [ "$type" = "ws" ]; then
+        transport_block=",
+      \"transport\": {
+        \"type\": \"ws\",
+        \"path\": \"${ws_path:-/}\",
+        \"headers\": { \"Host\": \"${ws_host:-$sni}\" }
+      }"
+    elif [ "$type" = "grpc" ]; then
+        transport_block=",
+      \"transport\": {
+        \"type\": \"grpc\",
+        \"service_name\": \"${ws_path:-}\"
+      }"
+    fi
+
+    # Flow only for reality/tls TCP, not for ws/grpc
+    flow_block=""
+    if [ "$type" != "ws" ] && [ "$type" != "grpc" ]; then
+        flow_block=", \"flow\": \"xtls-rprx-vision\""
+    fi
+
     cat > "$SINGBOX_CONFIG" <<EOF
 {
   "log": { "level": "warn" },
@@ -66,8 +92,8 @@ build_config() {
   },
   "outbounds": [
     {
-      "type": "vless", "tag": "proxy", "server": "$host", "server_port": $port, "uuid": "$uuid", "flow": "xtls-rprx-vision",
-      $tls_block
+      "type": "vless", "tag": "proxy", "server": "$host", "server_port": $port, "uuid": "$uuid"${flow_block},
+      $tls_block${transport_block}
     },
     { "type": "direct", "tag": "direct" }
   ]
@@ -126,9 +152,12 @@ host_port = line.split('@')[1].split('?')[0].rstrip('/')
 h, p = host_port.split(':')
 uuid = line.split('@')[0][8:]
 security = params.get('security','')
-print(f'{h}|{p}|{uuid}|{params.get(\"sni\",\"\")}|{params.get(\"pbk\",\"\")}|{params.get(\"sid\",\"\")}|{params.get(\"fp\",\"firefox\")}|{name}|{security}')
+typ = params.get('type','tcp')
+ws_host = params.get('host','')
+ws_path = params.get('path','/')
+print(f'{h}|{p}|{uuid}|{params.get(\"sni\",\"\")}|{params.get(\"pbk\",\"\")}|{params.get(\"sid\",\"\")}|{params.get(\"fp\",\"firefox\")}|{name}|{security}|{typ}|{ws_host}|{ws_path}')
 " 2>/dev/null)
-    IFS='|' read -r host port uuid sni pbk sid fp name security <<< "$parsed"
+    IFS='|' read -r host port uuid sni pbk sid fp name security type ws_host ws_path <<< "$parsed"
 
     if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         resolved="$host"
@@ -137,7 +166,7 @@ print(f'{h}|{p}|{uuid}|{params.get(\"sni\",\"\")}|{params.get(\"pbk\",\"\")}|{pa
         [ -z "$resolved" ] && resolved="$host"
     fi
 
-    build_config "$resolved" "$port" "$uuid" "$sni" "$pbk" "$sid" "$fp" "$security"
+    build_config "$resolved" "$port" "$uuid" "$sni" "$pbk" "$sid" "$fp" "$security" "$type" "$ws_host" "$ws_path"
     echo "$resolved" > "$VPN_SERVER_FILE"
     echo "Подключаюсь к $name..."
 
