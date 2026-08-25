@@ -1,0 +1,135 @@
+#!/bin/bash
+# vpn-proxy — оборачивает любой VPN-сервер из servers.txt в локальный SOCKS5-прокси.
+# Работает независимо от основного VPN (vpn-toggle). Не трогает маршруты.
+# Использование:
+#   vpn-proxy list                          — список серверов с номерами
+#   vpn-proxy <N> [port]                    — поднять прокси на сервере N (порт по умолч. 2338)
+#   vpn-proxy off                           — остановить все прокси
+#   vpn-proxy status                        — показать активные прокси
+
+SERVERS="/home/vlad/.local/share/vpn/servers.txt"
+SBIN="/home/vlad/.local/bin/sing-box"
+CONF_DIR="/tmp/vpn-proxy-conf"
+PID_DIR="/tmp/vpn-proxy-pid"
+DEFAULT_PORT=2338
+
+mkdir -p "$CONF_DIR" "$PID_DIR"
+
+list_servers() {
+    python3 - "$SERVERS" << 'PYEOF'
+import urllib.parse, sys
+for i, line in enumerate(open(sys.argv[1]), 1):
+    line = line.strip()
+    if not line.startswith("vless://"):
+        continue
+    try:
+        name = urllib.parse.unquote(line.split("#")[1]) if "#" in line else "?"
+    except:
+        name = "?"
+    print(f"{i}. {name}")
+PYEOF
+}
+
+stop_all() {
+    local any=0
+    for pidf in "$PID_DIR"/*.pid; do
+        [ -f "$pidf" ] || continue
+        local pid=$(cat "$pidf")
+        kill "$pid" 2>/dev/null
+        rm -f "$pidf"
+        any=1
+    done
+    rm -f "$CONF_DIR"/*.json 2>/dev/null
+    [ "$any" = 1 ] && echo "Прокси остановлены" || echo "Нет активных прокси"
+}
+
+status() {
+    local found=0
+    for pidf in "$PID_DIR"/*.pid; do
+        [ -f "$pidf" ] || continue
+        local pid=$(cat "$pidf")
+        if kill -0 "$pid" 2>/dev/null; then
+            local port=$(basename "$pidf" .pid)
+            echo "✓ SOCKS5 127.0.0.1:$port (pid $pid)"
+            found=1
+        else
+            rm -f "$pidf"
+        fi
+    done
+    [ "$found" = 0 ] && echo "Нет активных прокси"
+}
+
+case "${1:-status}" in
+    list) list_servers ;;
+    off|stop) stop_all ;;
+    status) status ;;
+    on)
+        # continue to numbered branch below
+        shift; set -- "${1:-}";;
+    *)
+        ;;
+esac
+
+# numbered server branch
+if [[ "$1" =~ ^[0-9]+$ ]]; then
+    n="$1"
+    port="${2:-$DEFAULT_PORT}"
+    line=$(python3 - "$SERVERS" "$n" << 'PYEOF'
+import urllib.parse, sys
+lines = [l.strip() for l in open(sys.argv[1]) if l.strip().startswith("vless://")]
+n = int(sys.argv[2])
+if 1 <= n <= len(lines):
+    print(lines[n-1])
+PYEOF
+)
+    if [ -z "$line" ]; then
+        echo "✗ Сервер $n не найден. Список: vpn-proxy list"
+        exit 1
+    fi
+
+    # check port not already in use
+    if ss -tln 2>/dev/null | grep -q ":$port "; then
+        echo "✗ Порт $port уже занят. Укажи другой: vpn-proxy $n <port>"
+        exit 1
+    fi
+
+    name=$(python3 -c "
+import urllib.parse, sys
+print(urllib.parse.unquote('''$line'''.split('#')[1]) if '#' in '''$line''' else '?')
+" 2>/dev/null)
+
+    # generate sing-box config: socks inbound + vless outbound, no TUN
+    python3 - "$line" "$port" > "$CONF_DIR/$port.json" << 'PYEOF'
+import urllib.parse, json, sys
+line, port = sys.argv[1], int(sys.argv[2])
+uuid = line.split("@")[0][8:]
+params = dict(kv.split("=",1) for kv in line.split("?")[1].split("#")[0].split("&") if "=" in kv)
+hp = line.split("@",1)[1].split("?")[0].split("#")[0].rstrip("/")
+h, p = hp.split(":")
+security = params.get("security","tls")
+tls = {"enabled": True, "server_name": params.get("sni", h),
+       "utls": {"enabled": True, "fingerprint": params.get("fp","firefox")}}
+if security == "reality":
+    tls["reality"] = {"enabled": True, "public_key": params["pbk"], "short_id": params.get("sid","")}
+cfg = {
+    "log": {"level": "warn"},
+    "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": port}],
+    "outbounds": [{"type": "vless", "tag": "proxy",
+        "server": h, "server_port": int(p), "uuid": uuid,
+        "flow": "xtls-rprx-vision", "tls": tls}],
+}
+json.dump(cfg, sys.stdout)
+PYEOF
+
+    setsid nohup "$SBIN" run -c "$CONF_DIR/$port.json" > /tmp/vpn-proxy-$port.log 2>&1 < /dev/null &
+    echo $! > "$PID_DIR/$port.pid"
+    sleep 2
+
+    if ss -tln 2>/dev/null | grep -q ":$port "; then
+        echo "✓ SOCKS5 прокси запущен на 127.0.0.1:$port → $name"
+        echo "  В приложении укажи: SOCKS5 127.0.0.1 порт $port"
+    else
+        echo "✗ Не удалось запустить. Лог: /tmp/vpn-proxy-$port.log"
+        rm -f "$PID_DIR/$port.pid"
+    fi
+fi
