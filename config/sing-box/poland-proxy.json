@@ -1,0 +1,33 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "route": {
+    "auto_detect_interface": true
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "listen": "127.0.0.1",
+      "listen_port": 2339
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "ronaldo.rkn.life",
+      "server_port": 443,
+      "uuid": "30f19571-6229-42d2-9b2d-07b395ae239b",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "ronaldo.rkn.life",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      }
+    }
+  ]
+}

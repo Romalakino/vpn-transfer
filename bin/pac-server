@@ -1,0 +1,50 @@
+#!/bin/bash
+# pac-server — раздаёт PAC-файл по HTTP (для system proxy в Firefox/Chromium)
+# Firefox: Настройки → Сеть → "Автоматическая конфигурация прокси" → http://127.0.0.1:8318/proxy.pac
+
+PORT=8318
+PAC_FILE="/home/vlad/.config/vpgram-proxy.pac"
+
+case "${1:-status}" in
+    on|start)
+        if ss -tln 2>/dev/null | grep -q ":$PORT "; then
+            echo "✓ PAC сервер уже запущен на 127.0.0.1:$PORT"
+        else
+            setsid nohup python3 -c "
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import sys
+PORT = $PORT
+PAC = open('$PAC_FILE').read()
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/x-ns-proxy-autoconfig')
+        self.send_header('Content-Length', str(len(PAC)))
+        self.end_headers()
+        self.wfile.write(PAC.encode())
+    def log_message(self, *a): pass
+HTTPServer(('127.0.0.1', PORT), H).serve_forever()
+" > /tmp/pac-server.log 2>&1 < /dev/null &
+            sleep 1
+            if ss -tln 2>/dev/null | grep -q ":$PORT "; then
+                echo "✓ PAC сервер запущен: http://127.0.0.1:$PORT/proxy.pac"
+            else
+                echo "✗ Не удалось запустить"
+            fi
+        fi
+        ;;
+    off|stop)
+        pkill -f "http.server.*$PORT" 2>/dev/null
+        echo "✓ PAC сервер остановлен"
+        ;;
+    status)
+        if ss -tln 2>/dev/null | grep -q ":$PORT "; then
+            echo "✓ PAC сервер работает: http://127.0.0.1:$PORT/proxy.pac"
+        else
+            echo "✗ PAC сервер не запущен"
+        fi
+        ;;
+    *)
+        echo "Использование: pac-server {on|off|status}"
+        ;;
+esac
