@@ -29,7 +29,7 @@ function FindProxyForURL(url, host) {
         dnsDomainIs(host, ".ibytedtos.com") ||
         dnsDomainIs(host, ".muscdn.com") ||
         dnsDomainIs(host, ".tiktokmusic.app")) {
-        return "SOCKS5 127.0.0.1:2338";
+        return "SOCKS5 127.0.0.1:2340";
     }
     return "DIRECT";
 }
