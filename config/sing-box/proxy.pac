@@ -13,7 +13,7 @@ function FindProxyForURL(url, host) {
         dnsDomainIs(host, ".openrouter.ai") ||
         dnsDomainIs(host, "api.openrouter.ai") ||
         dnsDomainIs(host, ".api.openrouter.ai")) {
-        return "SOCKS5 127.0.0.1:2339";
+        return "SOCKS5 127.0.0.1:2340";
     }
     if (dnsDomainIs(host, ".youtube.com") ||
         dnsDomainIs(host, "youtube.com") ||
