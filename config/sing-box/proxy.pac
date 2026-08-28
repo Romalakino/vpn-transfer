@@ -8,7 +8,11 @@ function FindProxyForURL(url, host) {
         dnsDomainIs(host, ".gemini.google.com") ||
         dnsDomainIs(host, "gemini.google.com") ||
         dnsDomainIs(host, ".bard.google.com") ||
-        dnsDomainIs(host, ".aistudio.google.com")) {
+        dnsDomainIs(host, ".aistudio.google.com") ||
+        dnsDomainIs(host, "openrouter.ai") ||
+        dnsDomainIs(host, ".openrouter.ai") ||
+        dnsDomainIs(host, "api.openrouter.ai") ||
+        dnsDomainIs(host, ".api.openrouter.ai")) {
         return "SOCKS5 127.0.0.1:2339";
     }
     if (dnsDomainIs(host, ".youtube.com") ||
