@@ -9,6 +9,7 @@ STATUS_FILE="/tmp/vpn-status"
 LOG_FILE="/tmp/sing-box.log"
 VPN_SERVER_FILE="/tmp/vpn-server-ip"
 VPN_NAME_FILE="/tmp/vpn-server-name"
+LAST_SRV="/home/vlad/.config/vpn/last-server.txt"
 VIA_GW="192.168.1.1"
 VIA_IF="enp13s0"
 TUN_GW="172.19.0.2"
@@ -402,6 +403,20 @@ for i, line in enumerate(sys.stdin, 1):
             vpn_ip=$(cat "$VPN_SERVER_FILE" 2>/dev/null)
             vpn_port=$(grep -oP '"server_port":\s*\K\d+' "$SINGBOX_CONFIG" 2>/dev/null)
             current=$(grep -F "@$vpn_ip:$vpn_port" "$LOCAL_SERVERS" 2>/dev/null | head -1)
+            # Fallback: сервер в списке может быть доменом, а не IP (grep по IP не найдёт)
+            if [ -z "$current" ]; then
+                vpn_name=$(cat "$VPN_NAME_FILE" 2>/dev/null)
+                if [ -n "$vpn_name" ]; then
+                    current=$(python3 -c "
+import sys, urllib.parse
+target = '''$vpn_name'''
+for line in open('$LOCAL_SERVERS'):
+    line = line.strip()
+    if '#' in line and urllib.parse.unquote(line.split('#', 1)[1]) == target:
+        print(line); break
+" 2>/dev/null)
+                fi
+            fi
             if [ -n "$current" ]; then
                 echo "$current" > "$LAST_SRV"
                 fav_name=$(echo "$current" | grep -oP '#\K.*$' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null)
