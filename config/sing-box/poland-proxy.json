@@ -16,13 +16,13 @@
     {
       "type": "vless",
       "tag": "proxy",
-      "server": "ronaldo.rkn.life",
+      "server": "pl1.datacore-tech.ru",
       "server_port": 443,
       "uuid": "30f19571-6229-42d2-9b2d-07b395ae239b",
       "flow": "xtls-rprx-vision",
       "tls": {
         "enabled": true,
-        "server_name": "ronaldo.rkn.life",
+        "server_name": "pl1.datacore-tech.ru",
         "utls": {
           "enabled": true,
           "fingerprint": "firefox"
